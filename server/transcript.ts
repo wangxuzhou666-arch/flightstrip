@@ -216,6 +216,7 @@ export async function digestTranscript(sessionId: string): Promise<TranscriptDig
   if (restart) cursor = freshCursor(path)
   const active = cursor as TranscriptCursor
   const start = restart ? Math.max(0, size - TAIL_BYTES) : active.offset
+  if (restart && start > 0) await scanEarlierJobs(active, path, start)
   const { lines, consumedTo } = await readCompleteLines(path, start, size)
   for (const line of restart && start > 0 ? lines.slice(1) : lines) applyLine(active, line)
   active.offset = consumedTo
@@ -232,6 +233,39 @@ export async function digestTranscript(sessionId: string): Promise<TranscriptDig
   pruneJobs(digest, Date.now())
   cursors.set(path, active)
   return digest
+}
+
+/** Before the tail, only lines about background jobs matter: a substring check first, and only a hit is parsed */
+const JOB_LINE_HINTS = ['"name":"Bash"', 'backgroundTaskId', 'with ID: ', '<task-notification>']
+// Commands sent before the tail mostly have their results already; only the latest few are kept for the tail to finish
+const KEEP_LAUNCHING = 20
+
+/** A file's first read only parses its tail, which misses background jobs started before the tail that are still
+ *  running (most visible right after flightstrip restarts). So first stream through the part before the tail and
+ *  pick up those jobs' starts and ends. Measured 2026-11-08: about 0.36 s for a 131 MB transcript */
+async function scanEarlierJobs(cursor: TranscriptCursor, path: string, end: number): Promise<void> {
+  const stream = createReadStream(path, { start: 0, end: end - 1 })
+  const lines = createInterface({ input: stream, crlfDelay: Infinity })
+  try {
+    for await (const line of lines) {
+      if (JOB_LINE_HINTS.some((hint) => line.includes(hint))) applyJobLine(cursor, line)
+    }
+  } finally {
+    lines.close()
+    stream.destroy()
+  }
+  cursor.launching = new Map([...cursor.launching].slice(-KEEP_LAUNCHING))
+}
+
+/** The part of applyLine that is about background jobs: their start, their task id, their end */
+function applyJobLine(cursor: TranscriptCursor, line: string): void {
+  const row = parseJsonLine(line)
+  if (row === null || row.isSidechain === true || typeof row.timestamp !== 'string') return
+  const at = Date.parse(row.timestamp)
+  const notice = queuedNotice(row)
+  if (notice !== null) noteJobEnds(cursor.digest, notice, at)
+  else if (row.type === 'user') noteUserBlocks(cursor, row, at)
+  else if (row.type === 'assistant') for (const block of blocksOf(row)) noteBashLaunch(cursor, block, at)
 }
 
 /** Streams from the top and parses only lines holding user entries, stopping once the opening messages are found: memory holds one line at a time, and a long transcript is read only as far as its start */
@@ -394,14 +428,17 @@ function applyAgentBlock(cursor: TranscriptCursor, block: ContentBlock, at: numb
     digest.pendingTool = block.name ?? null
     noteWorktrees(digest, block, at)
     const input = block.input ?? {}
-    if (block.name === 'Bash' && typeof input.command === 'string') {
-      notePages(digest, input.command, at, OPEN_COMMAND, 1)
-      if (block.id !== undefined) {
-        const description = typeof input.description === 'string' && input.description ? input.description : input.command
-        cursor.launching.set(block.id, { description: description.slice(0, 200), command: input.command.slice(0, 400), startedAt: at, background: input.run_in_background === true })
-      }
-    }
+    if (block.name === 'Bash' && typeof input.command === 'string') notePages(digest, input.command, at, OPEN_COMMAND, 1)
+    noteBashLaunch(cursor, block, at)
   }
+}
+
+/** Remembers a Bash command that was sent, so its result can tell whether it moved to the background */
+function noteBashLaunch(cursor: TranscriptCursor, block: ContentBlock, at: number): void {
+  const input = block.input ?? {}
+  if (block.type !== 'tool_use' || block.name !== 'Bash' || typeof input.command !== 'string' || block.id === undefined) return
+  const description = typeof input.description === 'string' && input.description ? input.description : input.command
+  cursor.launching.set(block.id, { description: description.slice(0, 200), command: input.command.slice(0, 400), startedAt: at, background: input.run_in_background === true })
 }
 
 /** <sessionId>/subagents/*.meta.json; only running ones and ones that ended within the window */

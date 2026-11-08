@@ -469,3 +469,41 @@ test('background jobs: both ways of starting one are tracked, every ending signa
   }
   server.run.child.kill()
 })
+
+test('background jobs: one started before the tail of a long transcript, which is all a first read parses, still shows', async () => {
+  const box = sandbox()
+  const custom = join(box.root, 'claude-config')
+  const tasks = join(box.root, 'tasks')
+  const sessionId = 'cafe0003-0000-4000-8000-00000000cafe'
+  mkdirSync(join(custom, 'sessions'), { recursive: true })
+  mkdirSync(join(custom, 'projects', 'lane'), { recursive: true })
+  mkdirSync(tasks)
+  writeFileSync(join(custom, 'sessions', `${process.pid}.json`), JSON.stringify({ sessionId, pid: process.pid, name: 'LONG-SESSION', cwd: box.home, startedAt: Date.now(), status: 'busy', entrypoint: 'cli' }))
+  const at = new Date().toISOString()
+  const outputs = { earlyRunning: 'epoch 4 of 20\n', earlyEnded: 'ok\n[exited with code 0]\n', earlyTimedOut: 'partial\n[killed]\n' }
+  for (const [id, output] of Object.entries(outputs)) writeFileSync(join(tasks, `${id}.output`), output)
+  const launch = (id, background) => [
+    { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: `tu-${id}`, name: 'Bash', input: { command: `run ${id}`, description: `Job ${id}`, run_in_background: background } }], usage: { input_tokens: 10 } } },
+    { type: 'user', timestamp: at, toolUseResult: { stdout: '', backgroundTaskId: id }, message: { content: [{ type: 'tool_result', tool_use_id: `tu-${id}`, content: `${background ? `Command running in background with ID: ${id}` : `Command did not complete within its 120s timeout and was moved to the background (ID: ${id})`}. Output is being written to: ${join(tasks, `${id}.output`)}. You will be notified when it completes` }] } },
+  ]
+  const rows = [
+    ...launch('earlyRunning', true),
+    ...launch('earlyEnded', true),
+    { type: 'attachment', timestamp: at, isSidechain: false, attachment: { type: 'queued_command', prompt: `<task-notification>\n<task-id>earlyEnded</task-id>\n<status>completed</status>\n</task-notification>` } },
+    ...launch('earlyTimedOut', false),
+  ]
+  // About 1.2 MB of plain conversation after them, more than the tail a first read parses (768 KB)
+  for (let i = 0; i < 1200; i++) rows.push({ type: 'assistant', timestamp: at, message: { content: [{ type: 'text', text: `Thinking step ${i}: ${'x'.repeat(1000)}` }], usage: { input_tokens: 10 } } })
+  rows.push({ type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: 't-last', name: 'Read', input: { file_path: 'src/last.ts' } }], usage: { input_tokens: 10 } } })
+  const transcript = rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
+  assert.ok(transcript.length > 1024 * 1024, 'the job starts lie outside the tail')
+  writeFileSync(join(custom, 'projects', 'lane', `${sessionId}.jsonl`), transcript)
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: custom }, box)
+  const strip = (snapshot) => snapshot.strips.find((s) => s.name === 'LONG-SESSION')
+  const snapshot = await snapshotWhere(server.url, (s) => strip(s) !== undefined && strip(s).now.includes('src/last.ts'))
+  const statuses = Object.fromEntries(strip(snapshot).jobs.map((job) => [job.id, job.status]))
+  assert.deepEqual(statuses, { earlyRunning: 'running', earlyEnded: 'completed', earlyTimedOut: 'stopped' })
+  assert.equal(strip(snapshot).jobs.find((job) => job.id === 'earlyRunning').tail, 'epoch 4 of 20')
+  server.run.child.kill()
+})
