@@ -670,3 +670,42 @@ test('background jobs: an unfinished record longer than the tail, at the boundar
   assert.deepEqual(s.strip(snapshot).jobs.map((job) => [job.id, job.status]), [['huge', 'running']])
   server.run.child.kill()
 })
+
+test('background jobs: 25 commands sent in one reply before the tail, with their results inside it, all show', async () => {
+  const s = jobSession('PARALLEL-SESSION', 'cafe000a-0000-4000-8000-00000000cafe')
+  const at = new Date().toISOString()
+  const ids = Array.from({ length: 25 }, (_, i) => `par${i}`)
+  for (const id of ids) writeFileSync(s.output(id), 'working\n')
+  const pairs = ids.map((id) => s.launch(id, at))
+  const sent = { type: 'assistant', timestamp: at, message: { content: pairs.map(([launchRow]) => launchRow.message.content[0]), usage: { input_tokens: 10 } } }
+  // About 600 KB between the reply and its results, then about 300 KB after them: the tail (768 KB) starts in between
+  const rows = [sent]
+  for (let i = 0; i < 600; i++) rows.push(filler(at, i))
+  rows.push(...pairs.map(([, resultRow]) => resultRow))
+  for (let i = 0; i < 300; i++) rows.push(filler(at, 1000 + i))
+  rows.push(lastRead(at))
+  s.write(rows)
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: s.custom }, s.box)
+  const snapshot = await snapshotWhere(server.url, (snap) => s.strip(snap)?.now.includes('src/last.ts'))
+  assert.deepEqual(s.strip(snapshot).jobs.map((job) => job.id).sort(), [...ids].sort())
+  assert.ok(s.strip(snapshot).jobs.every((job) => job.status === 'running'))
+  server.run.child.kill()
+})
+
+test('background jobs: an ending read off the output file is decided again when the file changes afterwards', async () => {
+  const s = jobSession('REDECIDE-SESSION', 'cafe000b-0000-4000-8000-00000000cafe')
+  const at = new Date().toISOString()
+  writeFileSync(s.output('redecided'), 'step 1\n[exited with code 0]\n')
+  s.write([...s.launch('redecided', at), lastRead(at)])
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: s.custom }, s.box)
+  const status = (snap) => s.strip(snap)?.jobs.find((job) => job.id === 'redecided')?.status
+  const first = await snapshotWhere(server.url, (snap) => status(snap) !== undefined)
+  assert.equal(status(first), 'completed')
+  // The exit line was the command's own output; it went on and was stopped later
+  appendFileSync(s.output('redecided'), 'step 2\n[killed]\n')
+  const later = await snapshotWhere(server.url, (snap) => status(snap) === 'stopped')
+  assert.equal(status(later), 'stopped')
+  server.run.child.kill()
+})

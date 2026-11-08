@@ -284,10 +284,10 @@ export async function digestTranscript(sessionId: string): Promise<TranscriptDig
 
 /** Before the tail, only lines about background jobs matter: a substring check first, and only a hit is parsed */
 const JOB_LINE_HINTS = ['"name":"Bash"', 'backgroundTaskId', 'with ID: ', '<task-notification>']
-// Commands sent before the tail mostly have their results already; only the latest few are kept for the tail to finish.
 // While scanning, results of foreground commands aren't parsed, so their entries are never removed: past SCAN_LAUNCHING
-// the oldest is dropped, so a long transcript doesn't pile every command it ever sent into memory
-const KEEP_LAUNCHING = 20
+// the oldest is dropped, so a long transcript doesn't pile every command it ever sent into memory. The rest are left
+// for the tail to finish: one reply can send dozens of commands at once with their results in the tail, so there is no
+// further trim
 const SCAN_LAUNCHING = 200
 
 /** A file's first read only parses its tail, which misses background jobs started before the tail that are still
@@ -306,7 +306,6 @@ async function scanEarlierJobs(cursor: TranscriptCursor, path: string, end: numb
     lines.close()
     stream.destroy()
   }
-  cursor.launching = new Map([...cursor.launching].slice(-KEEP_LAUNCHING))
 }
 
 /** The part of applyLine that is about background jobs: their start, their task id, their end */

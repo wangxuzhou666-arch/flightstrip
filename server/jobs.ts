@@ -6,7 +6,7 @@
 // stopped with TaskStop gets no notice and its last line is [killed]. When the notice was missed or never came, that
 // line is the fallback for telling the job ended
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { open, realpath } from 'node:fs/promises'
 import { connect } from 'node:net'
 import type { BackgroundJob, JobStatus, PageRef } from '../shared/types.ts'
@@ -27,6 +27,11 @@ const EXIT_LINE = /^\[(?:exited with code (\d+)|killed)\]$/
 // /usr/sbin, which isn't always on PATH
 const LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((path) => existsSync(path)) ?? 'lsof'
 const LSOF_TIMEOUT_MS = 5_000
+// A file found being written isn't checked again for this long, so a running job whose last line happens to be an exit
+// line doesn't start lsof on every refresh
+const HELD_RECHECK_MS = 5_000
+// output file (real path) → when a process was last found writing it
+const heldAt = new Map<string, number>()
 // A job with no notice and no output file is dropped from the record once it started this long ago (right after a
 // start the file may not exist yet, hence the wait)
 const GONE_AFTER_MS = 10 * 60_000
@@ -82,6 +87,13 @@ export async function jobsOf(raw: Record<string, RawJob>, nameOf: (description: 
   const shown: Shown[] = []
   const toConfirm: RawJob[] = []
   for (const job of Object.values(raw)) {
+    if (job.endedFromOutput === true && job.endedAt !== null && changedSince(job.outputPath, job.endedAt)) {
+      // An ending read off the output file only stands while the file stays unchanged: if more was written (the ending
+      // was wrong, or the job was stopped afterwards), decide again
+      job.status = null
+      job.endedAt = null
+      job.endedFromOutput = false
+    }
     if (job.status !== null) {
       shown.push({ job, tail: null })
       continue
@@ -112,6 +124,16 @@ export async function jobsOf(raw: Record<string, RawJob>, nameOf: (description: 
     .sort((a, b) => b.startedAt - a.startedAt)
 }
 
+/** Has the output file changed since `at`? */
+function changedSince(path: string | null, at: number): boolean {
+  if (path === null) return false
+  try {
+    return statSync(path).mtimeMs > at
+  } catch {
+    return false
+  }
+}
+
 interface Shown {
   job: RawJob
   tail: string | null
@@ -124,14 +146,24 @@ interface Shown {
 async function confirmEnded(jobs: RawJob[]): Promise<Shown[]> {
   const paths = jobs.map((job) => job.outputPath as string)
   const real = await Promise.all(paths.map((path) => realpath(path).catch(() => path)))
-  const written = await writtenFiles(real)
+  const now = Date.now()
+  const recentlyHeld = (path: string) => now - (heldAt.get(path) ?? -Infinity) < HELD_RECHECK_MS
+  const toProbe = real.filter((path) => !recentlyHeld(path))
+  const written = toProbe.length === 0 ? new Set<string>() : await writtenFiles(toProbe)
+  if (written instanceof Set) {
+    for (const path of toProbe) {
+      if (written.has(path)) heldAt.set(path, now)
+      else heldAt.delete(path)
+    }
+  }
+  const held = (path: string) => recentlyHeld(path) || (written instanceof Set && written.has(path))
   const shown: Shown[] = []
   for (const [i, job] of jobs.entries()) {
     // Something may have been written, or the command may have just exited, while lsof ran: read the last line again
     const read = await tailOf(paths[i])
     if (read === null) continue
     const exit = read.line?.match(EXIT_LINE)
-    if (!exit || (written instanceof Set && written.has(real[i]))) {
+    if (!exit || held(real[i])) {
       shown.push({ job, tail: clip(read.line) })
       continue
     }
