@@ -7,9 +7,9 @@
 // line is the fallback for telling the job ended
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { open } from 'node:fs/promises'
+import { open, realpath } from 'node:fs/promises'
 import { connect } from 'node:net'
-import type { BackgroundJob, PageRef } from '../shared/types.ts'
+import type { BackgroundJob, JobStatus, PageRef } from '../shared/types.ts'
 import type { RawJob } from './transcript.ts'
 
 const TAIL_BYTES = 4096
@@ -22,23 +22,34 @@ const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
 // The line Claude Code appends to the output file when a task ends: an exit code, or [killed] when it was stopped
 const EXIT_LINE = /^\[(?:exited with code (\d+)|killed)\]$/
 // A command's own output can hold that line too (a polling script that tails another task's output, say), so on seeing
-// it, also check that no process still has the file open. lsof takes about 0.1 s and only runs when that line shows up;
-// on macOS it lives in /usr/sbin, which isn't always on PATH
+// it, lsof also checks that no process has the file open for writing; one that only reads it (a `tail -f` someone left
+// running) doesn't count. All files to check in one pass go to a single lsof (about 0.1 s); on macOS it lives in
+// /usr/sbin, which isn't always on PATH
 const LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((path) => existsSync(path)) ?? 'lsof'
-const HELD_RECHECK_MS = 5_000
-// output file → when a process was last found holding it open
-const heldAt = new Map<string, number>()
+const LSOF_TIMEOUT_MS = 5_000
+// A job with no notice and no output file is dropped from the record once it started this long ago (right after a
+// start the file may not exist yet, hence the wait)
+const GONE_AFTER_MS = 10 * 60_000
 
-/** Does a process still have this file open? Without lsof, or if it fails, assume not and trust the line */
-async function stillWritten(path: string, now: number): Promise<boolean> {
-  const at = heldAt.get(path)
-  if (at !== undefined && now - at < HELD_RECHECK_MS) return true
-  const held = await new Promise<boolean>((done) => {
-    execFile(LSOF, ['-t', '--', path], { timeout: 2_000 }, (err, stdout) => done(err === null && stdout.trim() !== ''))
+/** Which of these files a process still has open for writing (lsof reports real paths).
+ *  missing = there is no lsof here, so it can never be checked; failed = it errored or timed out this time, so no
+ *  conclusion yet */
+function writtenFiles(paths: string[]): Promise<Set<string> | 'missing' | 'failed'> {
+  return new Promise((done) => {
+    execFile(LSOF, ['-F', 'an', '--', ...paths], { timeout: LSOF_TIMEOUT_MS }, (err, stdout) => {
+      if (err !== null && err.code === 'ENOENT') return done('missing')
+      // Exit code 1 = some file has no process holding it; the output is still good
+      if (err !== null && err.code !== 1) return done('failed')
+      const written = new Set<string>()
+      let mode = ''
+      for (const line of stdout.split('\n')) {
+        if (line.startsWith('f')) mode = ''
+        else if (line.startsWith('a')) mode = line.slice(1)
+        else if (line.startsWith('n') && /[wu]/.test(mode)) written.add(line.slice(1))
+      }
+      done(written)
+    })
   })
-  if (held) heldAt.set(path, now)
-  else heldAt.delete(path)
-  return held
 }
 
 /** The last non-empty line of the output file and when the file last changed; null if it can't be read */
@@ -67,39 +78,74 @@ function clip(line: string | null): string | null {
 }
 
 export async function jobsOf(raw: Record<string, RawJob>, nameOf: (description: string) => string): Promise<BackgroundJob[]> {
-  const jobs: BackgroundJob[] = []
+  const now = Date.now()
+  const shown: Shown[] = []
+  const toConfirm: RawJob[] = []
   for (const job of Object.values(raw)) {
-    let status = job.status
-    let endedAt = job.endedAt
-    let tail: string | null = null
-    if (status === null) {
-      // No notice received and the output file is gone too: killed by a restart, state unclear, so not shown
-      if (job.outputPath === null || !existsSync(job.outputPath)) continue
-      const read = await tailOf(job.outputPath)
-      if (read === null) continue
-      const exit = read.line?.match(EXIT_LINE)
-      if (exit && !(await stillWritten(job.outputPath, Date.now()))) {
-        status = exit[1] === undefined ? 'stopped' : exit[1] === '0' ? 'completed' : 'failed'
-        endedAt = read.modifiedAt
-        // Written back to the raw record: the file needn't be read again, and a long-ended job is cleared on time
-        job.status = status
-        job.endedAt = endedAt
-      } else {
-        tail = clip(read.line)
-      }
+    if (job.status !== null) {
+      shown.push({ job, tail: null })
+      continue
     }
-    jobs.push({
+    if (job.outputPath === null || !existsSync(job.outputPath)) {
+      // No notice received and the output file is gone too: killed by a restart, state unclear, so not shown. Once it
+      // has stayed that way for a while it is dropped, so such jobs don't pile up and get checked on every pass
+      if (now - job.startedAt > GONE_AFTER_MS) delete raw[job.id]
+      continue
+    }
+    const read = await tailOf(job.outputPath)
+    if (read === null) continue
+    if (read.line !== null && EXIT_LINE.test(read.line)) toConfirm.push(job)
+    else shown.push({ job, tail: clip(read.line) })
+  }
+  if (toConfirm.length > 0) shown.push(...(await confirmEnded(toConfirm)))
+  return shown
+    .map(({ job, tail }) => ({
       id: job.id,
       name: nameOf(job.description),
       description: job.description,
       command: job.command,
-      status: status ?? 'running',
+      status: job.status ?? 'running',
       startedAt: job.startedAt,
-      endedAt,
+      endedAt: job.endedAt,
       tail,
-    })
+    }))
+    .sort((a, b) => b.startedAt - a.startedAt)
+}
+
+interface Shown {
+  job: RawJob
+  tail: string | null
+}
+
+/** Jobs whose output ends with an exit line. No process writing it: the line ends the job, and that is written back to
+ *  the raw record (the file isn't read again, a long-ended job is cleared on time, and a later official notice can still
+ *  correct it). A process still writing it: the job is running. If lsof failed this time, the line is shown as the
+ *  status but not written back, and the next pass checks again */
+async function confirmEnded(jobs: RawJob[]): Promise<Shown[]> {
+  const paths = jobs.map((job) => job.outputPath as string)
+  const real = await Promise.all(paths.map((path) => realpath(path).catch(() => path)))
+  const written = await writtenFiles(real)
+  const shown: Shown[] = []
+  for (const [i, job] of jobs.entries()) {
+    // Something may have been written, or the command may have just exited, while lsof ran: read the last line again
+    const read = await tailOf(paths[i])
+    if (read === null) continue
+    const exit = read.line?.match(EXIT_LINE)
+    if (!exit || (written instanceof Set && written.has(real[i]))) {
+      shown.push({ job, tail: clip(read.line) })
+      continue
+    }
+    const status: JobStatus = exit[1] === undefined ? 'stopped' : exit[1] === '0' ? 'completed' : 'failed'
+    if (written === 'failed') {
+      shown.push({ job: { ...job, status, endedAt: read.modifiedAt }, tail: null })
+      continue
+    }
+    job.status = status
+    job.endedAt = read.modifiedAt
+    job.endedFromOutput = true
+    shown.push({ job, tail: null })
   }
-  return jobs.sort((a, b) => b.startedAt - a.startedAt)
+  return shown
 }
 
 // port → result and time of the last probe. Probing on every snapshot is too frequent, so a result is reused for 5 seconds

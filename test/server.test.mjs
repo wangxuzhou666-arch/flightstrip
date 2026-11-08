@@ -3,7 +3,7 @@
 // ~/.claude and ~/.flightstrip are never involved.
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -508,6 +508,9 @@ test('background jobs: one started before the tail of a long transcript, which i
   server.run.child.kill()
 })
 
+// The checks that a process still writes an output file use lsof
+const hasLsof = ['/usr/sbin/lsof', '/usr/bin/lsof'].some((path) => existsSync(path))
+
 /** A session in CLAUDE_CONFIG_DIR whose transcript is `rows`, plus a tasks dir for output files */
 function jobSession(name, sessionId) {
   const box = sandbox()
@@ -560,7 +563,7 @@ test('background jobs: one whose start record straddles the boundary of the tail
   server.run.child.kill()
 })
 
-test('background jobs: a running job whose own output ends with an exit line stays running until it really ends', { skip: !['/usr/sbin/lsof', '/usr/bin/lsof'].some((path) => existsSync(path)) && 'needs lsof' }, async () => {
+test('background jobs: a running job whose own output ends with an exit line stays running until it really ends', { skip: !hasLsof && 'needs lsof' }, async () => {
   const s = jobSession('POLLER-SESSION', 'cafe0005-0000-4000-8000-00000000cafe')
   const at = new Date().toISOString()
   // A polling loop that printed the last line of another task's output, and is still going
@@ -608,5 +611,62 @@ test('background jobs: a long run of ended jobs does not push out an earlier one
   assert.ok(longRun, 'the early job is still listed')
   assert.equal(longRun.status, 'running')
   assert.ok(s.strip(snapshot).jobs.filter((job) => job.id !== 'longRun').every((job) => job.status === 'stopped'))
+  server.run.child.kill()
+})
+
+test('background jobs: a reader left on the output does not keep a stopped job running, and a later notice corrects an ending read off the file', { skip: !hasLsof && 'needs lsof' }, async () => {
+  const s = jobSession('READER-SESSION', 'cafe0007-0000-4000-8000-00000000cafe')
+  const at = new Date().toISOString()
+  writeFileSync(s.output('watched'), 'partial\n[killed]\n')
+  writeFileSync(s.output('corrected'), 'done\n[exited with code 0]\n')
+  // Someone left `tail -f` on the stopped job's output: it holds the file open, but only for reading
+  const reader = spawn('tail', ['-f', s.output('watched')], { stdio: 'ignore' })
+  children.push(reader)
+  const rows = [...s.launch('watched', at), ...s.launch('corrected', at), lastRead(at)]
+  s.write(rows)
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: s.custom }, s.box)
+  const status = (snap, id) => s.strip(snap)?.jobs.find((job) => job.id === id)?.status
+  const first = await snapshotWhere(server.url, (snap) => status(snap, 'watched') !== undefined && status(snap, 'corrected') !== undefined)
+  assert.equal(status(first, 'watched'), 'stopped', 'a read-only holder is not a writer')
+  assert.equal(status(first, 'corrected'), 'completed')
+
+  // The official notice says otherwise, and arrives after the ending was read off the file
+  appendFileSync(join(s.custom, 'projects', 'lane', 'cafe0007-0000-4000-8000-00000000cafe.jsonl'), JSON.stringify({ type: 'attachment', timestamp: new Date().toISOString(), isSidechain: false, attachment: { type: 'queued_command', prompt: '<task-notification>\n<task-id>corrected</task-id>\n<status>failed</status>\n</task-notification>' } }) + '\n')
+  const later = await snapshotWhere(server.url, (snap) => status(snap, 'corrected') === 'failed')
+  assert.equal(status(later, 'corrected'), 'failed', 'the notice wins over the output file')
+  reader.kill()
+  server.run.child.kill()
+})
+
+test('background jobs: one that ended long ago, read off its output file, is cleared even while the transcript stays the same', async () => {
+  const s = jobSession('STALE-SESSION', 'cafe0008-0000-4000-8000-00000000cafe')
+  const at = new Date(Date.now() - 31 * 3_600_000).toISOString()
+  writeFileSync(s.output('old'), 'partial\n[killed]\n')
+  const longAgo = new Date(Date.now() - 30 * 3_600_000)
+  utimesSync(s.output('old'), longAgo, longAgo)
+  s.write([...s.launch('old', at), lastRead(new Date().toISOString())])
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: s.custom }, s.box)
+  await snapshotWhere(server.url, (snap) => s.strip(snap) !== undefined)
+  const cleared = await snapshotWhere(server.url, (snap) => s.strip(snap) !== undefined && s.strip(snap).jobs.length === 0)
+  assert.deepEqual(s.strip(cleared).jobs, [], 'stopped 30 hours ago, past the window')
+  server.run.child.kill()
+})
+
+test('background jobs: an unfinished record longer than the tail, at the boundary on startup, is parsed once it is finished', async () => {
+  const sessionId = 'cafe0009-0000-4000-8000-00000000cafe'
+  const s = jobSession('UNFINISHED-SESSION', sessionId)
+  const at = new Date().toISOString()
+  writeFileSync(s.output('huge'), 'working\n')
+  const [launchRow, resultRow] = s.launch('huge', at, 'z'.repeat(900_000))
+  // The result row is still being written: no newline after it yet
+  writeFileSync(join(s.custom, 'projects', 'lane', `${sessionId}.jsonl`), JSON.stringify(launchRow) + '\n' + JSON.stringify(resultRow))
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: s.custom }, s.box)
+  await snapshotWhere(server.url, (snap) => s.strip(snap) !== undefined)
+  appendFileSync(join(s.custom, 'projects', 'lane', `${sessionId}.jsonl`), '\n' + JSON.stringify(lastRead(at)) + '\n')
+  const snapshot = await snapshotWhere(server.url, (snap) => s.strip(snap)?.now.includes('src/last.ts'))
+  assert.deepEqual(s.strip(snapshot).jobs.map((job) => [job.id, job.status]), [['huge', 'running']])
   server.run.child.kill()
 })

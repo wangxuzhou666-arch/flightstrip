@@ -61,6 +61,8 @@ export interface RawJob {
   outputPath: string | null
   status: JobStatus | null
   endedAt: number | null
+  /** The ending was read off the output file's last line: an official notice that arrives later may correct it */
+  endedFromOutput?: boolean
 }
 
 // .claude/worktrees/<name> (created by Claude Code) counts as a worktree. The name only accepts [A-Za-z0-9._-];
@@ -123,6 +125,23 @@ async function nextLineStart(path: string, start: number, end: number): Promise<
       if (newline !== -1) return at + newline + 1
     }
     return null
+  } finally {
+    await handle.close()
+  }
+}
+
+/** Where the line that `start` falls in begins: just after the nearest newline before it, or 0 if there is none */
+async function lineStartBefore(path: string, start: number): Promise<number> {
+  const handle = await open(path, 'r')
+  try {
+    const chunk = Buffer.alloc(64 * 1024)
+    for (let end = start; end > 0; end -= chunk.length) {
+      const from = Math.max(0, end - chunk.length)
+      const { bytesRead } = await handle.read(chunk, 0, end - from, from)
+      const newline = chunk.subarray(0, bytesRead).lastIndexOf(0x0a)
+      if (newline !== -1) return from + newline + 1
+    }
+    return 0
   } finally {
     await handle.close()
   }
@@ -228,7 +247,11 @@ export async function digestTranscript(sessionId: string): Promise<TranscriptDig
   if (path === null) return null
   const { size } = await stat(path)
   let cursor = cursors.get(path)
-  if (cursor !== undefined && size === cursor.offset) return cursor.digest
+  if (cursor !== undefined && size === cursor.offset) {
+    // Prune even when the transcript hasn't changed: an ending read off an output file is written back afterwards
+    pruneJobs(cursor.digest, Date.now())
+    return cursor.digest
+  }
   // First read, or the file got shorter (rewritten): start TAIL_BYTES before the end; the first line may be partial and is dropped
   const restart = cursor === undefined || size < cursor.offset
   if (restart) cursor = freshCursor(path)
@@ -236,10 +259,10 @@ export async function digestTranscript(sessionId: string): Promise<TranscriptDig
   let start = restart ? Math.max(0, size - TAIL_BYTES) : active.offset
   if (restart && start > 0) {
     // The boundary usually falls inside a line: that whole line goes to the earlier part and the tail starts at the
-    // next line, so no line is cut in two. No newline found = the last line is unfinished and longer than the whole
-    // tail, so the tail has no complete line; read from the boundary as before
-    start = (await nextLineStart(path, start, size)) ?? start
-    await scanEarlierJobs(active, path, start)
+    // next line, so no line is cut in two. No newline after it = the last line is unfinished and longer than the whole
+    // tail: the tail starts where that line starts, and it is parsed whole once it is finished
+    start = (await nextLineStart(path, start, size)) ?? (await lineStartBefore(path, start))
+    if (start > 0) await scanEarlierJobs(active, path, start)
   }
   const { lines, consumedTo } = await readCompleteLines(path, start, size)
   for (const line of lines) applyLine(active, line)
@@ -379,9 +402,10 @@ function noteJobEnds(digest: TranscriptDigest, text: string, at: number): void {
     const job = digest.jobs[id]
     // The start entry lies before the tail we read: no description, so it isn't recorded. One notice shows up several
     // times (enqueue, attachment, dequeue); only the first counts
-    if (job === undefined || job.status !== null) continue
+    if (job === undefined || (job.status !== null && job.endedFromOutput !== true)) continue
     job.status = ENDED_STATUS[status] ?? 'completed'
     job.endedAt = at
+    job.endedFromOutput = false
   }
 }
 
