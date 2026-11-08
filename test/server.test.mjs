@@ -3,7 +3,7 @@
 // ~/.claude and ~/.flightstrip are never involved.
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -505,5 +505,108 @@ test('background jobs: one started before the tail of a long transcript, which i
   const statuses = Object.fromEntries(strip(snapshot).jobs.map((job) => [job.id, job.status]))
   assert.deepEqual(statuses, { earlyRunning: 'running', earlyEnded: 'completed', earlyTimedOut: 'stopped' })
   assert.equal(strip(snapshot).jobs.find((job) => job.id === 'earlyRunning').tail, 'epoch 4 of 20')
+  server.run.child.kill()
+})
+
+/** A session in CLAUDE_CONFIG_DIR whose transcript is `rows`, plus a tasks dir for output files */
+function jobSession(name, sessionId) {
+  const box = sandbox()
+  const custom = join(box.root, 'claude-config')
+  const tasks = join(box.root, 'tasks')
+  mkdirSync(join(custom, 'sessions'), { recursive: true })
+  mkdirSync(join(custom, 'projects', 'lane'), { recursive: true })
+  mkdirSync(tasks)
+  writeFileSync(join(custom, 'sessions', `${process.pid}.json`), JSON.stringify({ sessionId, pid: process.pid, name, cwd: box.home, startedAt: Date.now(), status: 'busy', entrypoint: 'cli' }))
+  const output = (id) => join(tasks, `${id}.output`)
+  const launch = (id, at, padding = '') => [
+    { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: `tu-${id}`, name: 'Bash', input: { command: `run ${id}`, description: `Job ${id}`, run_in_background: true } }], usage: { input_tokens: 10 } } },
+    { type: 'user', timestamp: at, toolUseResult: { stdout: padding, backgroundTaskId: id }, message: { content: [{ type: 'tool_result', tool_use_id: `tu-${id}`, content: `Command running in background with ID: ${id}. Output is being written to: ${output(id)}. You will be notified when it completes` }] } },
+  ]
+  const write = (rows) => writeFileSync(join(custom, 'projects', 'lane', `${sessionId}.jsonl`), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const strip = (snapshot) => snapshot.strips.find((s) => s.name === name)
+  return { box, custom, output, launch, write, strip }
+}
+
+const filler = (at, i) => ({ type: 'assistant', timestamp: at, message: { content: [{ type: 'text', text: `Thinking step ${i}: ${'x'.repeat(1000)}` }], usage: { input_tokens: 10 } } })
+const lastRead = (at) => ({ type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: 't-last', name: 'Read', input: { file_path: 'src/last.ts' } }], usage: { input_tokens: 10 } } })
+
+test('background jobs: one whose start record straddles the boundary of the tail a first read parses still shows', async () => {
+  const s = jobSession('STRADDLE-SESSION', 'cafe0004-0000-4000-8000-00000000cafe')
+  const at = new Date().toISOString()
+  writeFileSync(s.output('straddler'), 'step 1\n')
+  // The result row carries 40 KB, and is followed by just under 768 KB minus 20 KB of conversation, so the tail's
+  // first byte (size - 768 KB) lands about 20 KB before the end of that row
+  const [launchRow, resultRow] = s.launch('straddler', at, 'y'.repeat(40_000))
+  const after = []
+  let afterBytes = 0
+  for (let i = 0; ; i++) {
+    const row = filler(at, i)
+    const bytes = Buffer.byteLength(JSON.stringify(row)) + 1
+    if (afterBytes + bytes > 768 * 1024 - 20_000) break
+    after.push(row)
+    afterBytes += bytes
+  }
+  after.push(lastRead(at))
+  afterBytes += Buffer.byteLength(JSON.stringify(after.at(-1))) + 1
+  const before = Buffer.byteLength(JSON.stringify(launchRow)) + 1
+  const resultBytes = Buffer.byteLength(JSON.stringify(resultRow)) + 1
+  const tailStart = before + resultBytes + afterBytes - 768 * 1024
+  assert.ok(tailStart > before && tailStart < before + resultBytes, 'the tail boundary falls inside the result row')
+  s.write([launchRow, resultRow, ...after])
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: s.custom }, s.box)
+  const snapshot = await snapshotWhere(server.url, (snap) => s.strip(snap)?.now.includes('src/last.ts'))
+  assert.deepEqual(s.strip(snapshot).jobs.map((job) => [job.id, job.status]), [['straddler', 'running']])
+  server.run.child.kill()
+})
+
+test('background jobs: a running job whose own output ends with an exit line stays running until it really ends', { skip: !['/usr/sbin/lsof', '/usr/bin/lsof'].some((path) => existsSync(path)) && 'needs lsof' }, async () => {
+  const s = jobSession('POLLER-SESSION', 'cafe0005-0000-4000-8000-00000000cafe')
+  const at = new Date().toISOString()
+  // A polling loop that printed the last line of another task's output, and is still going
+  writeFileSync(s.output('poller'), 'other task: [exited with code 0]\n[exited with code 0]\n')
+  const fd = openSync(s.output('poller'), 'a')
+  const holder = spawn('sleep', ['60'], { stdio: ['ignore', fd, 'ignore'] })
+  children.push(holder)
+  closeSync(fd)
+  s.write([...s.launch('poller', at), lastRead(at)])
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: s.custom }, s.box)
+  const job = (snap) => s.strip(snap)?.jobs.find((j) => j.id === 'poller')
+  const first = await snapshotWhere(server.url, (snap) => job(snap) !== undefined)
+  assert.equal(job(first).status, 'running', 'a process still has the output open')
+  assert.equal(job(first).tail, '[exited with code 0]')
+
+  holder.kill()
+  const deadline = Date.now() + 15_000
+  let later = first
+  while (job(later).status === 'running' && Date.now() < deadline) {
+    await new Promise((wait) => setTimeout(wait, 500))
+    ;[later] = await snapshots(server.url, 1)
+  }
+  assert.equal(job(later).status, 'completed', 'once nothing holds the file, the exit line ends the job')
+  assert.equal(typeof job(later).endedAt, 'number')
+  server.run.child.kill()
+})
+
+test('background jobs: a long run of ended jobs does not push out an earlier one still running', async () => {
+  const s = jobSession('CROWDED-SESSION', 'cafe0006-0000-4000-8000-00000000cafe')
+  const hoursAgo = (hours) => new Date(Date.now() - hours * 3_600_000).toISOString()
+  writeFileSync(s.output('longRun'), 'epoch 9 of 50\n')
+  const rows = [...s.launch('longRun', hoursAgo(31))]
+  // 61 later jobs that were stopped (no notice, [killed] as the last line), more than the 60 kept
+  for (let i = 0; i < 61; i++) {
+    writeFileSync(s.output(`stopped${i}`), 'partial\n[killed]\n')
+    rows.push(...s.launch(`stopped${i}`, hoursAgo(30)))
+  }
+  rows.push(lastRead(new Date().toISOString()))
+  s.write(rows)
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: s.custom }, s.box)
+  const snapshot = await snapshotWhere(server.url, (snap) => (s.strip(snap)?.jobs.length ?? 0) > 0)
+  const longRun = s.strip(snapshot).jobs.find((job) => job.id === 'longRun')
+  assert.ok(longRun, 'the early job is still listed')
+  assert.equal(longRun.status, 'running')
+  assert.ok(s.strip(snapshot).jobs.filter((job) => job.id !== 'longRun').every((job) => job.status === 'stopped'))
   server.run.child.kill()
 })

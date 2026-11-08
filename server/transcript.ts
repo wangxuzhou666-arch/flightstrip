@@ -110,6 +110,24 @@ export async function locateTranscript(sessionId: string): Promise<string | null
 }
 
 /** Reads the complete lines in [start, end); a half-written line at the end waits for the next round, and consumedTo stops right after the last newline */
+/** Where the line that `start` falls in ends, i.e. where the next line begins; `start` itself if it begins a line, null
+ *  if there is no newline before `end` */
+async function nextLineStart(path: string, start: number, end: number): Promise<number | null> {
+  const handle = await open(path, 'r')
+  try {
+    const chunk = Buffer.alloc(64 * 1024)
+    for (let at = start - 1; at < end; at += chunk.length) {
+      const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, end - at), at)
+      if (bytesRead === 0) break
+      const newline = chunk.subarray(0, bytesRead).indexOf(0x0a)
+      if (newline !== -1) return at + newline + 1
+    }
+    return null
+  } finally {
+    await handle.close()
+  }
+}
+
 async function readCompleteLines(path: string, start: number, end: number): Promise<{ lines: string[]; consumedTo: number }> {
   const handle = await open(path, 'r')
   try {
@@ -215,10 +233,16 @@ export async function digestTranscript(sessionId: string): Promise<TranscriptDig
   const restart = cursor === undefined || size < cursor.offset
   if (restart) cursor = freshCursor(path)
   const active = cursor as TranscriptCursor
-  const start = restart ? Math.max(0, size - TAIL_BYTES) : active.offset
-  if (restart && start > 0) await scanEarlierJobs(active, path, start)
+  let start = restart ? Math.max(0, size - TAIL_BYTES) : active.offset
+  if (restart && start > 0) {
+    // The boundary usually falls inside a line: that whole line goes to the earlier part and the tail starts at the
+    // next line, so no line is cut in two. No newline found = the last line is unfinished and longer than the whole
+    // tail, so the tail has no complete line; read from the boundary as before
+    start = (await nextLineStart(path, start, size)) ?? start
+    await scanEarlierJobs(active, path, start)
+  }
   const { lines, consumedTo } = await readCompleteLines(path, start, size)
-  for (const line of restart && start > 0 ? lines.slice(1) : lines) applyLine(active, line)
+  for (const line of lines) applyLine(active, line)
   active.offset = consumedTo
   const digest = active.digest
   // The tail doesn't necessarily start at the beginning: on the first read of a file, stream from the top to pick up the
@@ -237,8 +261,11 @@ export async function digestTranscript(sessionId: string): Promise<TranscriptDig
 
 /** Before the tail, only lines about background jobs matter: a substring check first, and only a hit is parsed */
 const JOB_LINE_HINTS = ['"name":"Bash"', 'backgroundTaskId', 'with ID: ', '<task-notification>']
-// Commands sent before the tail mostly have their results already; only the latest few are kept for the tail to finish
+// Commands sent before the tail mostly have their results already; only the latest few are kept for the tail to finish.
+// While scanning, results of foreground commands aren't parsed, so their entries are never removed: past SCAN_LAUNCHING
+// the oldest is dropped, so a long transcript doesn't pile every command it ever sent into memory
 const KEEP_LAUNCHING = 20
+const SCAN_LAUNCHING = 200
 
 /** A file's first read only parses its tail, which misses background jobs started before the tail that are still
  *  running (most visible right after flightstrip restarts). So first stream through the part before the tail and
@@ -248,7 +275,9 @@ async function scanEarlierJobs(cursor: TranscriptCursor, path: string, end: numb
   const lines = createInterface({ input: stream, crlfDelay: Infinity })
   try {
     for await (const line of lines) {
-      if (JOB_LINE_HINTS.some((hint) => line.includes(hint))) applyJobLine(cursor, line)
+      if (!JOB_LINE_HINTS.some((hint) => line.includes(hint))) continue
+      applyJobLine(cursor, line)
+      if (cursor.launching.size > SCAN_LAUNCHING) cursor.launching.delete(cursor.launching.keys().next().value as string)
     }
   } finally {
     lines.close()
@@ -290,12 +319,17 @@ async function scanOpeningPrompts(path: string, end: number): Promise<string[]> 
   return prompts
 }
 
+/** Every job that hasn't ended is kept; of the ended ones, only the latest KEEP_JOBS within the window. The cap only
+ *  pushes out ended jobs, so a long run of ended ones can't push out an early job that is still running (an ending
+ *  read off the output file is written back by jobsOf, and is cleared on time like any other) */
 function pruneJobs(digest: TranscriptDigest, now: number): void {
-  const jobs = Object.values(digest.jobs)
-    .filter((job) => job.endedAt === null || now - job.endedAt < KEEP_JOBS_MS)
+  const all = Object.values(digest.jobs)
+  const open = all.filter((job) => job.status === null)
+  const ended = all
+    .filter((job) => job.status !== null && job.endedAt !== null && now - job.endedAt < KEEP_JOBS_MS)
     .sort((a, b) => b.startedAt - a.startedAt)
     .slice(0, KEEP_JOBS)
-  digest.jobs = Object.fromEntries(jobs.map((job) => [job.id, job]))
+  digest.jobs = Object.fromEntries([...open, ...ended].map((job) => [job.id, job]))
 }
 
 function notePages(digest: TranscriptDigest, text: string, at: number, pattern: RegExp, group: number): void {

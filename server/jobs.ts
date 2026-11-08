@@ -5,6 +5,7 @@
 // Measured 2026-11-08: the output file stays after the task ends, with [exited with code N] as its last line; a task
 // stopped with TaskStop gets no notice and its last line is [killed]. When the notice was missed or never came, that
 // line is the fallback for telling the job ended
+import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { connect } from 'node:net'
@@ -20,6 +21,25 @@ const PROBE_CACHE_MS = 5_000
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
 // The line Claude Code appends to the output file when a task ends: an exit code, or [killed] when it was stopped
 const EXIT_LINE = /^\[(?:exited with code (\d+)|killed)\]$/
+// A command's own output can hold that line too (a polling script that tails another task's output, say), so on seeing
+// it, also check that no process still has the file open. lsof takes about 0.1 s and only runs when that line shows up;
+// on macOS it lives in /usr/sbin, which isn't always on PATH
+const LSOF = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((path) => existsSync(path)) ?? 'lsof'
+const HELD_RECHECK_MS = 5_000
+// output file → when a process was last found holding it open
+const heldAt = new Map<string, number>()
+
+/** Does a process still have this file open? Without lsof, or if it fails, assume not and trust the line */
+async function stillWritten(path: string, now: number): Promise<boolean> {
+  const at = heldAt.get(path)
+  if (at !== undefined && now - at < HELD_RECHECK_MS) return true
+  const held = await new Promise<boolean>((done) => {
+    execFile(LSOF, ['-t', '--', path], { timeout: 2_000 }, (err, stdout) => done(err === null && stdout.trim() !== ''))
+  })
+  if (held) heldAt.set(path, now)
+  else heldAt.delete(path)
+  return held
+}
 
 /** The last non-empty line of the output file and when the file last changed; null if it can't be read */
 async function tailOf(path: string): Promise<{ line: string | null; modifiedAt: number } | null> {
@@ -58,9 +78,12 @@ export async function jobsOf(raw: Record<string, RawJob>, nameOf: (description: 
       const read = await tailOf(job.outputPath)
       if (read === null) continue
       const exit = read.line?.match(EXIT_LINE)
-      if (exit) {
+      if (exit && !(await stillWritten(job.outputPath, Date.now()))) {
         status = exit[1] === undefined ? 'stopped' : exit[1] === '0' ? 'completed' : 'failed'
         endedAt = read.modifiedAt
+        // Written back to the raw record: the file needn't be read again, and a long-ended job is cleared on time
+        job.status = status
+        job.endedAt = endedAt
       } else {
         tail = clip(read.line)
       }
