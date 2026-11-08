@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="426" viewBox="0 0 960 426" role="img" aria-labelledby="title desc">
+  <title id="title">How flightstrip works</title>
+  <desc id="desc">Claude Code sessions write session, job and transcript files to ~/.claude. The flightstrip server on 127.0.0.1 reads them, parses only new lines, builds one snapshot and streams it to your browser. Optional: Haiku writes goal and progress lines; a setup hook lets each session keep its own checklist in ~/.flightstrip.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#59636e"/>
+    </marker>
+    <marker id="arrow-brand" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#4d6bfe"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+      .title { font-size: 15px; font-weight: 600; }
+      .sub { font-size: 12px; fill: #59636e; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+      .label { font-size: 11.5px; fill: #59636e; }
+      .step { font-size: 12.5px; }
+      .num { font-size: 12.5px; fill: #4d6bfe; font-weight: 600; }
+      .box { fill: #ffffff; stroke: #d0d7de; }
+      .optional { fill: #ffffff; stroke: #8c959f; stroke-dasharray: 5 4; }
+      .wire { stroke: #59636e; stroke-width: 1.4; fill: none; }
+      .wire-optional { stroke: #8c959f; stroke-width: 1.4; fill: none; stroke-dasharray: 5 4; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="959" height="425" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+
+  <!-- Claude Code: the files it already writes -->
+  <rect x="28" y="28" width="300" height="250" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text class="title" x="48" y="58">Claude Code sessions</text>
+  <text class="sub" x="48" y="78">in VS Code, terminals or the background</text>
+  <rect class="box" x="44" y="98" width="268" height="46" rx="8"/>
+  <text class="mono" x="58" y="118">~/.claude/sessions/*.json</text>
+  <text class="label" x="58" y="134">live sessions</text>
+  <rect class="box" x="44" y="152" width="268" height="46" rx="8"/>
+  <text class="mono" x="58" y="172">~/.claude/jobs/*/state.json</text>
+  <text class="label" x="58" y="188">background sessions</text>
+  <rect class="box" x="44" y="206" width="268" height="46" rx="8"/>
+  <text class="mono" x="58" y="226">~/.claude/projects/**/&lt;id&gt;.jsonl</text>
+  <text class="label" x="58" y="242">transcripts, read from the end</text>
+
+  <!-- read-only into the server -->
+  <path class="wire" d="M328 153 H398" marker-end="url(#arrow)"/>
+  <text class="label" x="364" y="143" text-anchor="middle">read-only</text>
+
+  <!-- flightstrip server -->
+  <rect x="400" y="68" width="220" height="170" rx="10" fill="#eef1ff" stroke="#4d6bfe"/>
+  <text class="title" x="420" y="98">flightstrip server</text>
+  <text class="sub" x="420" y="118">listens on 127.0.0.1 only</text>
+  <text class="num" x="420" y="150">1</text><text class="step" x="436" y="150">watch for file changes</text>
+  <text class="num" x="420" y="174">2</text><text class="step" x="436" y="174">parse only the new lines</text>
+  <text class="num" x="420" y="198">3</text><text class="step" x="436" y="198">build one snapshot</text>
+
+  <!-- live updates to the browser -->
+  <path d="M620 153 H714" stroke="#4d6bfe" stroke-width="1.4" fill="none" marker-end="url(#arrow-brand)"/>
+  <text class="label" x="668" y="143" text-anchor="middle">live updates</text>
+  <text class="label" x="668" y="170" text-anchor="middle">over SSE</text>
+
+  <!-- your browser -->
+  <rect class="box" x="716" y="88" width="216" height="130" rx="10"/>
+  <text class="title" x="736" y="118">Your browser</text>
+  <text class="sub" x="736" y="138">one strip per session</text>
+  <rect x="736" y="154" width="176" height="14" rx="3" fill="#fdf1e6"/>
+  <rect x="736" y="154" width="4" height="14" rx="1.5" fill="#d9822b"/>
+  <rect x="736" y="174" width="176" height="14" rx="3" fill="#f6f8fa"/>
+  <rect x="736" y="194" width="176" height="14" rx="3" fill="#f6f8fa"/>
+
+  <!-- state the board keeps -->
+  <path class="wire" d="M510 240 V310" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <rect class="box" x="400" y="312" width="220" height="86" rx="10"/>
+  <text class="mono" x="420" y="340" style="font-size:13px;font-weight:600">~/.flightstrip</text>
+  <text class="sub" x="420" y="360">groups, names, checklists</text>
+  <text class="sub" x="420" y="378">and caches</text>
+
+  <!-- optional: Haiku summaries -->
+  <path class="wire-optional" d="M620 214 H668 V355 H714" marker-end="url(#arrow)"/>
+  <rect class="optional" x="716" y="312" width="216" height="86" rx="10"/>
+  <text class="title" x="736" y="340" style="font-size:14px">Haiku via claude -p</text>
+  <text class="sub" x="736" y="360">optional: writes the goal and</text>
+  <text class="sub" x="736" y="378">progress lines, with no tools</text>
+
+  <!-- optional: the setup hook -->
+  <path class="wire-optional" d="M178 278 V310" marker-end="url(#arrow)"/>
+  <rect class="optional" x="28" y="312" width="300" height="86" rx="10"/>
+  <text class="title" x="48" y="340" style="font-size:14px">setup hook (optional)</text>
+  <text class="sub" x="48" y="360">each turn, the session reads and ticks</text>
+  <text class="sub" x="48" y="378">its own checklist with todo.mjs</text>
+  <path class="wire-optional" d="M328 355 H398" marker-end="url(#arrow)"/>
+</svg>

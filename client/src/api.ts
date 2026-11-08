@@ -1,0 +1,31 @@
+import type { Lang } from '../../shared/i18n/index.ts'
+import { shownTranslator } from './i18n.tsx'
+
+// Write actions. The X-Flightstrip header is the marker the server accepts from the local page; other sites can't send a cross-origin request carrying it
+export type SessionAction = 'rename' | 'retire' | 'unretire' | 'group'
+export type GroupOp = 'create' | 'rename' | 'delete' | 'move'
+
+async function post(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Flightstrip': '1' },
+    body: JSON.stringify(body),
+  })
+  const reply = (await res.json().catch(() => ({}))) as Record<string, unknown> & { error?: string }
+  if (res.ok) return reply
+  // The server words its own errors in the page's language; this fallback is for replies that are not its JSON (a proxy, a crash)
+  throw new Error(reply.error ?? shownTranslator()('error.http', { status: res.status }))
+}
+
+export async function postAction(sessionId: string, action: SessionAction, body: Record<string, unknown> = {}): Promise<void> {
+  await post(`/api/sessions/${sessionId}/${action}`, body)
+}
+
+export async function postGroup(op: GroupOp, body: Record<string, unknown>): Promise<void> {
+  await post(`/api/groups/${op}`, body)
+}
+
+/** Saves the language on the server; the next snapshot carries it back and the page switches then */
+export async function postLang(lang: Lang): Promise<void> {
+  await post('/api/settings', { lang })
+}

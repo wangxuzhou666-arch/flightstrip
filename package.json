@@ -1,0 +1,68 @@
+{
+  "name": "flightstrip",
+  "version": "0.1.0",
+  "description": "Live local dashboard for your Claude Code sessions: one strip per session with goals, progress, context usage and background jobs.",
+  "keywords": [
+    "claude-code",
+    "claude",
+    "anthropic",
+    "ai-agents",
+    "dashboard",
+    "sessions",
+    "monitoring",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wangxuzhou666-arch/flightstrip.git"
+  },
+  "homepage": "https://github.com/wangxuzhou666-arch/flightstrip#readme",
+  "bugs": {
+    "url": "https://github.com/wangxuzhou666-arch/flightstrip/issues"
+  },
+  "type": "module",
+  "bin": {
+    "flightstrip": "bin/flightstrip.mjs"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "hooks/",
+    "scripts/todo.mjs",
+    "scripts/statusline.mjs",
+    "dist/",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,web \"tsx watch server/index.ts\" \"vite\"",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "vite build",
+    "build:server": "vite build --config vite.server.config.ts",
+    "prepack": "npm run build",
+    "start": "npm run build && node bin/flightstrip.mjs --no-open",
+    "demo": "npm run build && node bin/flightstrip.mjs --demo",
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "service:install": "npm run build && node bin/flightstrip.mjs service install",
+    "service:restart": "npm run build && node bin/flightstrip.mjs service restart",
+    "service:status": "node bin/flightstrip.mjs service status",
+    "service:logs": "node bin/flightstrip.mjs service logs",
+    "service:uninstall": "node bin/flightstrip.mjs service uninstall"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.2.1",
+    "concurrently": "^10.0.7",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.6"
+  }
+}

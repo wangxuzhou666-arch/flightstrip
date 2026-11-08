@@ -1,0 +1,401 @@
+// End to end through the CLI and the built server bundle (dist/server.js): demo mode and a first run on a machine with
+// no Claude Code data. HOME points at a temp dir, a fake `claude` and `open` on PATH record any call, and the real
+// ~/.claude and ~/.flightstrip are never involved.
+import assert from 'node:assert/strict'
+import { execFileSync, spawn } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
+import { tmpdir, userInfo } from 'node:os'
+import { dirname, join } from 'node:path'
+import { after, before, test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
+const CLI = join(REPO, 'bin', 'flightstrip.mjs')
+const children = []
+const roots = []
+
+// Always rebuild the server bundle so the tests run the current source (client build in dist/ is left alone)
+before(() => {
+  execFileSync(process.execPath, [join(REPO, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--config', 'vite.server.config.ts'], { cwd: REPO, stdio: 'pipe' })
+})
+
+after(() => {
+  for (const child of children) child.kill('SIGKILL')
+  for (const dir of roots) rmSync(dir, { recursive: true, force: true })
+})
+
+/** A temp HOME with a fake `claude` and `open` (each appends its arguments to a log) first on PATH, and a canary session in ~/.claude */
+function sandbox() {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'fs-server-')))
+  roots.push(root)
+  const home = join(root, 'home')
+  const bin = join(root, 'bin')
+  mkdirSync(bin)
+  mkdirSync(join(home, '.claude', 'sessions'), { recursive: true })
+  const calls = join(root, 'calls.log')
+  for (const name of ['claude', 'open']) {
+    writeFileSync(join(bin, name), `#!/bin/sh\necho "${name} $*" >> "${calls}"\n`)
+    chmodSync(join(bin, name), 0o755)
+  }
+  // A live-looking session of the "real" user: demo mode must not show it
+  writeFileSync(join(home, '.claude', 'sessions', `${process.pid}.json`), JSON.stringify({ sessionId: 'cafe0000-0000-4000-8000-00000000cafe', pid: process.pid, name: 'REAL-SESSION-CANARY', cwd: '/real/place', startedAt: Date.now(), status: 'busy' }))
+  return { root, home, bin, calls, env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home } }
+}
+
+function freePort() {
+  return new Promise((done) => {
+    const probe = createServer()
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address()
+      probe.close(() => done(port))
+    })
+  })
+}
+
+/** Runs the CLI; resolves once it printed `ready` (or exited) */
+function runCli(args, env, ready = /flightstrip is running|already running|could not start|Port \d+/) {
+  const child = spawn(process.execPath, [CLI, ...args], { env })
+  children.push(child)
+  let out = ''
+  let err = ''
+  const exited = new Promise((done) => child.on('close', (status) => done(status)))
+  const started = new Promise((done) => {
+    const check = () => { if (ready.test(out + err)) done() }
+    child.stdout.on('data', (chunk) => { out += chunk; check() })
+    child.stderr.on('data', (chunk) => { err += chunk; check() })
+    exited.then(done)
+  })
+  return { child, exited, started, output: () => out, errors: () => err }
+}
+
+/** Reads `count` snapshots from the SSE stream */
+async function snapshots(url, count) {
+  const controller = new AbortController()
+  const res = await fetch(`${url}/api/stream`, { signal: controller.signal })
+  const decoder = new TextDecoder()
+  const found = []
+  let buffer = ''
+  try {
+    for await (const chunk of res.body) {
+      buffer += decoder.decode(chunk, { stream: true })
+      const messages = buffer.split('\n\n')
+      buffer = messages.pop()
+      for (const message of messages) if (message.startsWith('data: ')) found.push(JSON.parse(message.slice(6)))
+      if (found.length >= count) break
+    }
+  } finally {
+    controller.abort()
+  }
+  return found
+}
+
+async function post(url, path, body) {
+  const res = await fetch(`${url}${path}`, {
+    method: 'POST', body: JSON.stringify(body),
+    headers: { 'Content-Type': 'application/json', 'X-Flightstrip': '1', Origin: url },
+  })
+  return { status: res.status, body: await res.json() }
+}
+
+const latest = async (url) => (await snapshots(url, 1))[0]
+
+/** Waits for the first snapshot that satisfies `done`: a write is pushed with the next refresh, not instantly */
+async function snapshotWhere(url, done) {
+  const deadline = Date.now() + 8000
+  for (;;) {
+    const [snapshot] = await snapshots(url, 1)
+    if (done(snapshot) || Date.now() > deadline) return snapshot
+    await new Promise((wait) => setTimeout(wait, 100))
+  }
+}
+
+async function waitForFile(path) {
+  for (let tries = 0; tries < 50 && !existsSync(path); tries += 1) await new Promise((wait) => setTimeout(wait, 100))
+  return readFileSync(path, 'utf8')
+}
+const byName = (snapshot, name) => snapshot.strips.find((strip) => strip.name === name)
+
+async function startDemo() {
+  const box = sandbox()
+  const port = await freePort()
+  const env = { ...box.env, PORT: String(port) }
+  const run = runCli(['--demo', '--no-open'], env)
+  await run.started
+  return { ...box, port, url: `http://127.0.0.1:${port}`, env, run }
+}
+
+test('demo: the first snapshot has fictional sessions covering every state the UI renders', async () => {
+  const demo = await startDemo()
+  const snapshot = await latest(demo.url)
+  const { strips } = snapshot
+  assert.ok(strips.length >= 7 && strips.length <= 8, `${strips.length} strips`)
+  assert.deepEqual(new Set(strips.map((s) => s.stateKind)), new Set(['needs', 'working', 'failed', 'idle']))
+  assert.deepEqual(new Set(strips.map((s) => s.bay)), new Set(['needs', 'working', 'done', 'idle']))
+  assert.ok(strips.some((s) => s.kind === 'background') && strips.some((s) => s.kind === 'interactive'))
+
+  const jobs = strips.flatMap((s) => s.jobs)
+  assert.ok(jobs.some((j) => j.status === 'running' && j.tail), 'a running job with an output tail')
+  assert.ok(jobs.some((j) => j.status === 'failed'), 'a failed job')
+  assert.ok(jobs.some((j) => j.status === 'completed'), 'a finished job (the "N more finished" link)')
+  assert.ok(strips.some((s) => s.subagents.length > 0 && s.subagents.some((a) => a.running)), 'subagents')
+  assert.ok(strips.some((s) => s.stateKind === 'needs' && s.now.length > 40), 'a pending question')
+  assert.ok(strips.some((s) => s.worktrees.length > 0), 'worktrees')
+  assert.ok(strips.some((s) => s.pages.some((p) => p.live)), 'a live page')
+  assert.deepEqual(new Set(strips.flatMap((s) => (s.pr ? [s.pr.checks] : []))), new Set(['pass', 'fail', 'pending']))
+  assert.ok(strips.some((s) => s.todos?.some((t) => t.done) && s.todos.some((t) => !t.done)), 'a partly done checklist')
+  assert.ok(strips.every((s) => s.progress && s.goal))
+  assert.ok(strips.some((s) => s.todoSource === 'session') && strips.some((s) => s.todoSource === 'haiku'))
+  assert.ok(strips.some((s) => s.segments.some((seg) => seg.state === 'needs')) && strips.some((s) => s.segments.some((seg) => seg.state === 'failed')))
+
+  const contexts = strips.map((s) => s.contextTokens).filter((n) => n !== null)
+  assert.ok(contexts.some((n) => n >= 100_000 && n <= 140_000), 'about 120K')
+  assert.ok(contexts.some((n) => n >= snapshot.contextLine * 0.75 && n < snapshot.contextLine), 'in the warning zone')
+  assert.ok(contexts.some((n) => n > snapshot.contextLine), 'over the line')
+
+  assert.equal(snapshot.groups.length, 3)
+  assert.ok(strips.some((s) => s.groupId === null) && strips.every((s) => s.groupId === null || snapshot.groups.some((g) => g.id === s.groupId)))
+  assert.ok(snapshot.usage !== null)
+  assert.equal(snapshot.error, null)
+  const sessionIds = new Set(strips.map((s) => s.sessionId))
+  assert.equal(sessionIds.size, strips.length)
+  assert.equal(new Set(strips.map((s) => s.sessionId.slice(0, 8))).size, strips.length, 'distinct 8-char prefixes (card ids and view transitions use them)')
+  assert.ok(strips.every((s) => /^[0-9a-f-]{36}$/.test(s.sessionId)), 'ids pass the server route check')
+  demo.run.child.kill()
+})
+
+test('demo: nothing personal, nothing read from ~/.claude, no claude process, nothing written to disk', async () => {
+  const demo = await startDemo()
+  const snapshot = await latest(demo.url)
+  const text = JSON.stringify(snapshot)
+  assert.ok(!text.includes('REAL-SESSION-CANARY') && !text.includes('/real/place'), 'the real session must not show up')
+  for (const personal of [userInfo().username, '/Users/', '/home/', demo.home]) assert.ok(!text.includes(personal), `snapshot mentions ${personal}`)
+  assert.ok(snapshot.strips.every((s) => s.cwd.startsWith('~/projects/acme-shop') && s.project === 'acme-shop'))
+
+  // Exercise every kind of write, then check nothing reached the disk or the claude CLI
+  const [auth, docs, audit] = ['Migrate auth to OAuth2', 'Write v2 API docs', 'Nightly dependency audit'].map((name) => byName(snapshot, name))
+  assert.equal((await post(demo.url, '/api/groups/create', { name: 'Scratch', sessionId: auth.sessionId })).status, 200)
+  assert.equal((await post(demo.url, `/api/sessions/${auth.sessionId}/rename`, { name: 'Renamed in demo' })).status, 200)
+  assert.equal((await post(demo.url, `/api/sessions/${docs.sessionId}/retire`, {})).status, 200)
+  assert.equal((await post(demo.url, `/api/sessions/${audit.sessionId}/retire`, {})).status, 200)
+  assert.equal(existsSync(join(demo.home, '.flightstrip')), false, 'the state dir must not be created')
+  assert.equal(existsSync(demo.calls), false, 'claude must never be spawned in demo mode')
+  assert.equal(readFileSync(join(demo.home, '.claude', 'sessions', `${process.pid}.json`), 'utf8').includes('REAL-SESSION-CANARY'), true)
+  demo.run.child.kill()
+})
+
+test('demo: group, rename and retire work in memory and show up in the next snapshot', async () => {
+  const demo = await startDemo()
+  const first = await latest(demo.url)
+  const auth = byName(first, 'Migrate auth to OAuth2')
+  const created = await post(demo.url, '/api/groups/create', { name: 'Scratch', sessionId: auth.sessionId })
+  assert.equal(created.status, 200)
+  assert.equal((await post(demo.url, `/api/sessions/${auth.sessionId}/rename`, { name: 'Renamed in demo' })).status, 200)
+  const docs = byName(first, 'Write v2 API docs')
+  assert.equal((await post(demo.url, `/api/sessions/${docs.sessionId}/retire`, {})).status, 200)
+  const audit = byName(first, 'Nightly dependency audit')
+  assert.equal(audit.stateKind, 'working')
+  assert.equal((await post(demo.url, `/api/sessions/${audit.sessionId}/retire`, {})).status, 200)
+
+  const second = await snapshotWhere(demo.url, (snapshot) => snapshot.retired.length === 2 && byName(snapshot, 'Renamed in demo') !== undefined)
+  const renamed = second.strips.find((s) => s.sessionId === auth.sessionId)
+  assert.equal(renamed.name, 'Renamed in demo')
+  assert.equal(renamed.groupId, created.body.id)
+  assert.ok(second.groups.some((g) => g.name === 'Scratch'))
+  assert.deepEqual(new Set(second.retired.map((r) => r.name)), new Set(['Write v2 API docs', 'Nightly dependency audit']), 'a stopped demo background session stays retired')
+  assert.ok(!second.strips.some((s) => s.sessionId === docs.sessionId))
+
+  const restored = await post(demo.url, `/api/sessions/${docs.sessionId}/unretire`, {})
+  assert.equal(restored.status, 200)
+  assert.ok((await snapshotWhere(demo.url, (snapshot) => snapshot.retired.length === 1)).strips.some((s) => s.sessionId === docs.sessionId))
+  assert.equal((await post(demo.url, '/api/groups/rename', { id: created.body.id, name: '' })).status, 400, 'the real validation still applies')
+  assert.equal((await post(demo.url, `/api/sessions/de100099-0000-4000-8000-000000000000/rename`, { name: 'x' })).status, 404)
+  demo.run.child.kill()
+})
+
+test('demo: it keeps ticking, so working strips look live', async () => {
+  const demo = await startDemo()
+  const [a, b] = await snapshots(demo.url, 2)
+  assert.ok(b.takenAt > a.takenAt)
+  const e2e = (snapshot) => byName(snapshot, 'Fix flaky checkout e2e test')
+  assert.ok(e2e(b).segments.at(-1).to > e2e(a).segments.at(-1).to, 'the activity band grows')
+  assert.ok(e2e(b).updatedAt > e2e(a).updatedAt)
+  assert.equal(e2e(a).jobs[0].startedAt, e2e(b).jobs[0].startedAt, 'the job keeps its start time, so its runtime counts up')
+  demo.run.child.kill()
+})
+
+test('a second `flightstrip` on a running instance opens the browser instead of starting another server', async () => {
+  const demo = await startDemo()
+  const again = runCli(['--demo'], demo.env, /already running/)
+  assert.equal(await again.exited, 0)
+  assert.match(again.output(), /already running at/)
+  assert.match(await waitForFile(demo.calls), new RegExp(`open ${demo.url}`))
+
+  const plain = runCli(['--no-open'], demo.env)
+  assert.equal(await plain.exited, 1, 'a normal start must not silently attach to a demo')
+  assert.match(plain.errors(), /demo is already running on port/)
+  assert.match(plain.errors(), new RegExp(`PORT=${demo.port + 1} flightstrip`))
+  demo.run.child.kill()
+})
+
+test('FLIGHTSTRIP_DEMO=1 works like --demo', async () => {
+  const box = sandbox()
+  const port = await freePort()
+  const run = runCli(['--no-open'], { ...box.env, PORT: String(port), FLIGHTSTRIP_DEMO: '1' })
+  await run.started
+  const health = await (await fetch(`http://127.0.0.1:${port}/api/health`)).json()
+  assert.deepEqual({ app: health.app, demo: health.demo }, { app: 'flightstrip', demo: true })
+  run.child.kill()
+})
+
+test('first run with no ~/.claude and no claude CLI: starts, shows an empty board and explains', async () => {
+  const box = sandbox()
+  rmSync(join(box.home, '.claude'), { recursive: true })
+  const port = await freePort()
+  const env = { PATH: dirname(box.bin), HOME: box.home, PORT: String(port) }
+  const run = runCli(['--no-open'], env, /flightstrip is running/)
+  await run.started
+  const url = `http://127.0.0.1:${port}`
+  assert.match(run.errors(), /`claude` CLI is not on your PATH/)
+  assert.match(run.errors(), /~\/\.claude does not exist/)
+  assert.match(run.errors(), /--demo/)
+  const snapshot = await latest(url)
+  assert.deepEqual({ strips: snapshot.strips, retired: snapshot.retired, error: snapshot.error }, { strips: [], retired: [], error: null })
+  const page = await fetch(url)
+  assert.equal(page.status, 200)
+  assert.match(await page.text(), /<div id="root">/)
+  assert.equal(run.child.exitCode, null, 'still running')
+  run.child.kill()
+})
+
+test('a bad FLIGHTSTRIP_* value is reported in one sentence, not a stack trace', async () => {
+  const box = sandbox()
+  const run = runCli(['--demo', '--no-open'], { ...box.env, PORT: String(await freePort()), FLIGHTSTRIP_BRIEFS: 'maybe' })
+  assert.equal(await run.exited, 1)
+  assert.match(run.errors(), /flightstrip could not start: FLIGHTSTRIP_BRIEFS must be "on" or "off", got "maybe"/)
+  assert.doesNotMatch(run.errors(), /\n\s+at /)
+})
+
+// ---- language ----
+
+/** A server on a real (non-demo) HOME with no ~/.claude, so only what the test puts in place is read */
+async function startReal(extraEnv = {}, box = sandbox()) {
+  const port = await freePort()
+  const env = { ...box.env, PORT: String(port), FLIGHTSTRIP_BRIEFS: 'off', ...extraEnv }
+  const run = runCli(['--no-open'], env, /flightstrip is running|could not start/)
+  await run.started
+  return { ...box, port, url: `http://127.0.0.1:${port}`, env, run }
+}
+
+test('lang: FLIGHTSTRIP_LANG sets the first language, the toggle switches it, and the server text follows', async () => {
+  const box = sandbox()
+  const port = await freePort()
+  const run = runCli(['--demo', '--no-open'], { ...box.env, PORT: String(port), FLIGHTSTRIP_LANG: 'zh' })
+  await run.started
+  const url = `http://127.0.0.1:${port}`
+  const first = await latest(url)
+  assert.equal(first.lang, 'zh')
+  const surfaces = (snapshot) => new Set(snapshot.strips.map((s) => s.surface))
+  assert.ok(surfaces(first).has('后台') && surfaces(first).has('终端'), [...surfaces(first)].join())
+  assert.ok(byName(first, 'Migrate auth to OAuth2').now.startsWith('等你回答：Should sign-in'), byName(first, 'Migrate auth to OAuth2').now)
+
+  const switched = await post(url, '/api/settings', { lang: 'en' })
+  assert.deepEqual(switched, { status: 200, body: { ok: true } })
+  const second = await snapshotWhere(url, (snapshot) => snapshot.lang === 'en')
+  assert.equal(second.lang, 'en')
+  assert.ok(surfaces(second).has('Background') && surfaces(second).has('Terminal'), [...surfaces(second)].join())
+  assert.ok(byName(second, 'Migrate auth to OAuth2').now.startsWith('Waiting for your answer: Should sign-in'))
+  assert.equal(existsSync(join(box.home, '.flightstrip')), false, 'demo mode keeps the choice in memory')
+
+  // Demo text that is page chrome, not fixture: the line after a retire
+  const audit = byName(second, 'Nightly dependency audit')
+  assert.equal((await post(url, `/api/sessions/${audit.sessionId}/retire`, {})).status, 200)
+  await post(url, '/api/settings', { lang: 'zh' })
+  const third = await snapshotWhere(url, (snapshot) => snapshot.lang === 'zh' && snapshot.retired.length === 1)
+  assert.equal(third.lang, 'zh')
+  run.child.kill()
+})
+
+test('lang: the settings route is checked like the other writes and rejects anything but en and zh', async () => {
+  const demo = await startDemo()
+  const send = (headers, body) => fetch(`${demo.url}/api/settings`, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json', ...headers } })
+  const trusted = { 'X-Flightstrip': '1', Origin: demo.url }
+  assert.equal((await send({}, { lang: 'zh' })).status, 403, 'no header, no origin')
+  assert.equal((await send({ 'X-Flightstrip': '1' }, { lang: 'zh' })).status, 403, 'no origin')
+  assert.equal((await send({ ...trusted, Origin: 'http://evil.example' }, { lang: 'zh' })).status, 403, 'foreign origin')
+  assert.equal((await send(trusted, { lang: 'zh' })).status, 200)
+  for (const body of [{ lang: 'fr' }, { lang: 'EN' }, { lang: null }, { lang: 1 }, {}]) {
+    const res = await send(trusted, body)
+    assert.equal(res.status, 400, JSON.stringify(body))
+    assert.equal((await res.json()).error, '语言只能是 "en" 或 "zh"', 'the error is in the language that was current')
+  }
+  assert.equal((await latest(demo.url)).lang, 'zh', 'a rejected request changed nothing')
+  demo.run.child.kill()
+})
+
+test('lang: a saved choice beats FLIGHTSTRIP_LANG, which beats the system locale; the choice survives a restart', async () => {
+  const box = sandbox()
+  rmSync(join(box.home, '.claude'), { recursive: true })
+  const stateFile = join(box.home, '.flightstrip', 'settings.json')
+
+  const first = await startReal({ FLIGHTSTRIP_LANG: 'zh' }, box)
+  assert.equal((await latest(first.url)).lang, 'zh')
+  assert.equal((await post(first.url, '/api/settings', { lang: 'en' })).status, 200)
+  assert.equal((await snapshotWhere(first.url, (s) => s.lang === 'en')).lang, 'en')
+  assert.deepEqual(JSON.parse(readFileSync(stateFile, 'utf8')), { lang: 'en' })
+  first.run.child.kill()
+  await first.run.exited
+
+  const restarted = await startReal({ FLIGHTSTRIP_LANG: 'zh' }, box)
+  assert.equal((await latest(restarted.url)).lang, 'en', 'saved en beats env zh')
+  restarted.run.child.kill()
+  await restarted.run.exited
+
+  rmSync(stateFile)
+  const fromEnv = await startReal({ FLIGHTSTRIP_LANG: 'zh', LANG: 'en_US.UTF-8' }, box)
+  assert.equal((await latest(fromEnv.url)).lang, 'zh', 'env beats the system locale')
+  fromEnv.run.child.kill()
+  await fromEnv.run.exited
+
+  for (const [locale, expected] of [['zh_CN.UTF-8', 'zh'], ['en_US.UTF-8', 'en'], ['fr_FR.UTF-8', 'en']]) {
+    const located = await startReal({ LANG: locale }, box)
+    assert.equal((await latest(located.url)).lang, expected, `system locale ${locale}`)
+    located.run.child.kill()
+    await located.run.exited
+  }
+
+  writeFileSync(stateFile, '{ not json')
+  const corrupt = await startReal({ FLIGHTSTRIP_LANG: 'zh' }, box)
+  assert.equal((await latest(corrupt.url)).lang, 'zh', 'a corrupt settings file is ignored, not a crash')
+  corrupt.run.child.kill()
+})
+
+test('CLAUDE_CONFIG_DIR: sessions and transcripts come from it, and the text read off a transcript follows a language switch', async () => {
+  const box = sandbox()
+  const custom = join(box.root, 'claude-config')
+  const sessionId = 'cafe0001-0000-4000-8000-00000000cafe'
+  mkdirSync(join(custom, 'sessions'), { recursive: true })
+  mkdirSync(join(custom, 'projects', 'lane'), { recursive: true })
+  // cwd = HOME: a session that belongs to no project
+  writeFileSync(join(custom, 'sessions', `${process.pid}.json`), JSON.stringify({ sessionId, pid: process.pid, name: 'CUSTOM-DIR-SESSION', cwd: box.home, startedAt: Date.now(), status: 'busy', entrypoint: 'cli' }))
+  const at = new Date().toISOString()
+  writeFileSync(join(custom, 'projects', 'lane', `${sessionId}.jsonl`), [
+    { type: 'user', timestamp: at, message: { content: 'Please fix the login bug' } },
+    { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'src/a.ts' } }], usage: { input_tokens: 10 } } },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: custom, FLIGHTSTRIP_LANG: 'zh' }, box)
+  const strip = (snapshot) => snapshot.strips.find((s) => s.name === 'CUSTOM-DIR-SESSION')
+  const first = await snapshotWhere(server.url, (snapshot) => strip(snapshot) !== undefined)
+  assert.ok(strip(first), 'the session in CLAUDE_CONFIG_DIR is listed')
+  assert.ok(!JSON.stringify(first).includes('REAL-SESSION-CANARY'), 'the one in ~/.claude is not')
+  assert.equal(strip(first).project, null, 'a session in the home directory belongs to no project')
+  assert.equal(strip(first).now, '读文件：src/a.ts')
+  assert.equal(strip(first).surface, '终端')
+
+  assert.equal((await post(server.url, '/api/settings', { lang: 'en' })).status, 200)
+  const second = await snapshotWhere(server.url, (snapshot) => snapshot.lang === 'en')
+  assert.equal(strip(second).now, 'Reading a file: src/a.ts', 'the cached transcript digest is worded again in the new language')
+  assert.equal(strip(second).surface, 'Terminal')
+  server.run.child.kill()
+})
