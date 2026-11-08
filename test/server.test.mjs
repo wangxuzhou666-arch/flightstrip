@@ -400,7 +400,7 @@ test('CLAUDE_CONFIG_DIR: sessions and transcripts come from it, and the text rea
   server.run.child.kill()
 })
 
-test('background jobs: every completion signal ends a job, and only jobs with no ending show as running', async () => {
+test('background jobs: both ways of starting one are tracked, every ending signal ends one, and only jobs with no ending show as running', async () => {
   const box = sandbox()
   const custom = join(box.root, 'claude-config')
   const tasks = join(box.root, 'tasks')
@@ -420,15 +420,27 @@ test('background jobs: every completion signal ends a job, and only jobs with no
     exitOne: { output: 'Error: boom\n[exited with code 1]\n' },
     stillGoing: { output: 'step 3 of 10\n' },
     fileGone: { output: null },
+    stoppedByTaskStop: { output: 'partial\n[killed]\n' },
+    // A foreground command that ran past its timeout and was moved to the background
+    timedOut: { output: 'scanning…\n', foreground: true },
   }
   const rows = []
   for (const [id, job] of Object.entries(jobs)) {
     if (job.output !== null) writeFileSync(join(tasks, `${id}.output`), job.output)
+    const outputPath = join(tasks, `${id}.output`)
+    const result = job.foreground
+      ? { content: `Command did not complete within its 120s timeout and was moved to the background (ID: ${id}). Output is being written to: ${outputPath}. You will be notified when it completes.`, toolUseResult: { stdout: '', backgroundTaskId: id, timedOutAfterMs: 120000 } }
+      : { content: `Command running in background with ID: ${id}. Output is being written to: ${outputPath}. You will be notified when it completes`, toolUseResult: id === 'oldUserRow' ? undefined : { stdout: '', backgroundTaskId: id } }
     rows.push(
-      { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: `tu-${id}`, name: 'Bash', input: { command: `run ${id}`, description: `Job ${id}`, run_in_background: true } }], usage: { input_tokens: 10 } } },
-      { type: 'user', timestamp: at, message: { content: [{ type: 'tool_result', tool_use_id: `tu-${id}`, content: `Command running in background with ID: ${id}. Output is being written to: ${join(tasks, `${id}.output`)}. You will be notified when it completes` }] } },
+      { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: `tu-${id}`, name: 'Bash', input: { command: `run ${id}`, description: `Job ${id}`, run_in_background: !job.foreground } }], usage: { input_tokens: 10 } } },
+      { type: 'user', timestamp: at, toolUseResult: result.toolUseResult, message: { content: [{ type: 'tool_result', tool_use_id: `tu-${id}`, content: result.content }] } },
     )
   }
+  // A foreground command that finished, whose output only quotes a launch message, starts no job
+  rows.push(
+    { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: 'tu-quote', name: 'Bash', input: { command: 'grep ID log.txt', description: 'Search the log' } }], usage: { input_tokens: 10 } } },
+    { type: 'user', timestamp: at, toolUseResult: { stdout: 'Command running in background with ID: quoted.' }, message: { content: [{ type: 'tool_result', tool_use_id: 'tu-quote', content: 'Command running in background with ID: quoted. Output is being written to: /x/quoted.output' }] } },
+  )
   // The format observed 2026-11-07: a user entry
   rows.push({ type: 'user', timestamp: at, message: { content: [{ type: 'text', text: notice('oldUserRow', 'completed') }] } })
   // The format observed 2026-11-08: an attachment entry, and queue-operation entries (enqueue, then remove)
@@ -443,13 +455,13 @@ test('background jobs: every completion signal ends a job, and only jobs with no
   const strip = (snapshot) => snapshot.strips.find((s) => s.name === 'JOBS-SESSION')
   const snapshot = await snapshotWhere(server.url, (s) => (strip(s)?.jobs.length ?? 0) > 0)
   const shown = Object.fromEntries(strip(snapshot).jobs.map((job) => [job.id, job]))
-  assert.deepEqual(Object.keys(shown).sort(), ['attachmentRow', 'exitOne', 'exitZero', 'oldUserRow', 'queueRow', 'stillGoing'], 'a job whose output file is gone and that got no notice is not shown')
+  assert.deepEqual(Object.keys(shown).sort(), ['attachmentRow', 'exitOne', 'exitZero', 'oldUserRow', 'queueRow', 'stillGoing', 'stoppedByTaskStop', 'timedOut'], 'a job whose output file is gone and that got no notice is not shown')
   const statuses = Object.fromEntries(Object.entries(shown).map(([id, job]) => [id, job.status]))
-  assert.deepEqual(statuses, { oldUserRow: 'completed', attachmentRow: 'failed', queueRow: 'completed', exitZero: 'completed', exitOne: 'failed', stillGoing: 'running' })
+  assert.deepEqual(statuses, { oldUserRow: 'completed', attachmentRow: 'failed', queueRow: 'completed', exitZero: 'completed', exitOne: 'failed', stillGoing: 'running', stoppedByTaskStop: 'stopped', timedOut: 'running' })
   for (const [id, job] of Object.entries(shown)) {
-    if (id === 'stillGoing') {
+    if (id === 'stillGoing' || id === 'timedOut') {
       assert.equal(job.endedAt, null)
-      assert.equal(job.tail, 'step 3 of 10', 'a running job shows its last line of output')
+      assert.equal(job.tail, jobs[id].output.trim(), 'a running job shows its last line of output')
     } else {
       assert.equal(typeof job.endedAt, 'number', `${id} has an end time`)
       assert.equal(job.tail, null, `${id} shows no live output line`)

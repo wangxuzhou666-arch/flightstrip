@@ -46,7 +46,11 @@ export interface TranscriptDigest {
   contextTokens: number | null
 }
 
-/** A Bash call with run_in_background. status null = no completion notice received yet */
+/** A Bash command sent that has no result yet; background = whether it was sent with run_in_background */
+type Launch = Pick<RawJob, 'description' | 'command' | 'startedAt'> & { background: boolean }
+
+/** A Bash command running in the background: sent with run_in_background, or a foreground command moved there after
+ *  it timed out. status null = no completion notice received yet */
 export interface RawJob {
   id: string
   description: string
@@ -68,7 +72,12 @@ const WORKTREE_PATH = /(\/[^\s"'`\\]+?\/\.claude\/worktrees\/[\w.-]+)(?![\w.*$?{
 // when it ends, the session receives a notice containing <task-notification>, with status completed / failed / stopped.
 // Measured 2026-11-08: the notice is no longer a user entry but a queue-operation entry (content) and an attachment entry
 // (attachment.type is queued_command, text in prompt)
-const JOB_STARTED = /with ID: (\w+)\.?(?:[\s\S]*?written to: (\S+?)\.?(?:\s|$))?/
+// Measured 2026-11-08: a foreground command that runs past its timeout moves to the background, and its result reads
+// "…moved to the background (ID: <id>). Output is being written to: <path>". Both kinds of entry carry
+// toolUseResult.backgroundTaskId, which is read first; the text is only a fallback for run_in_background commands in
+// the older format
+const JOB_STARTED = /with ID: (\w+)/
+const JOB_OUTPUT = /written to: (\S+?)\.?(?:\s|$)/
 const JOB_ENDED = /<task-id>(\w+)<\/task-id>[\s\S]*?<status>(\w+)<\/status>/g
 // Local pages: localhost / 127.0.0.1 with a port. API and health-check endpoints don't count as pages
 const LOCAL_URL = /https?:\/\/(?:localhost|127\.0\.0\.1):\d{2,5}(?:\/[^\s"'`)<>\]，。、\\]*)?/g
@@ -177,8 +186,9 @@ interface TranscriptCursor {
   offset: number
   customTitle: string | null
   aiTitle: string | null
-  /** Background commands launched that have not received a task id yet: tool_use id → description */
-  launching: Map<string, Omit<RawJob, 'id' | 'outputPath' | 'status' | 'endedAt'>>
+  /** Bash commands sent that have no result yet: tool_use id → description. A foreground command that times out also
+   *  moves to the background, so every one is recorded */
+  launching: Map<string, Launch>
   digest: TranscriptDigest
 }
 const cursors = new Map<string, TranscriptCursor>()
@@ -277,12 +287,21 @@ function noteUserBlocks(cursor: TranscriptCursor, row: Record<string, unknown>, 
       const launch = cursor.launching.get(block.tool_use_id)
       if (launch === undefined) continue
       cursor.launching.delete(block.tool_use_id)
-      const started = resultText(block).match(JOB_STARTED)
-      if (started !== null) digest.jobs[started[1]] = { ...launch, id: started[1], outputPath: started[2] ?? null, status: null, endedAt: null }
+      const text = resultText(block)
+      const id = backgroundTaskIdOf(row) ?? (launch.background ? text.match(JOB_STARTED)?.[1] : undefined)
+      if (id === undefined) continue
+      const { background: _, ...job } = launch
+      digest.jobs[id] = { ...job, id, outputPath: text.match(JOB_OUTPUT)?.[1] ?? null, status: null, endedAt: null }
     } else if (block.type === 'text' && block.text !== undefined) {
       noteJobEnds(digest, block.text, at)
     }
   }
+}
+
+/** The background task id Claude Code records on a tool_result entry; a command that finished in the foreground has none */
+function backgroundTaskIdOf(row: Record<string, unknown>): string | undefined {
+  const result = row.toolUseResult as { backgroundTaskId?: unknown } | undefined
+  return typeof result?.backgroundTaskId === 'string' && /^\w+$/.test(result.backgroundTaskId) ? result.backgroundTaskId : undefined
 }
 
 /** Reads which background jobs a completion notice says ended, and how */
@@ -377,9 +396,9 @@ function applyAgentBlock(cursor: TranscriptCursor, block: ContentBlock, at: numb
     const input = block.input ?? {}
     if (block.name === 'Bash' && typeof input.command === 'string') {
       notePages(digest, input.command, at, OPEN_COMMAND, 1)
-      if (input.run_in_background === true && block.id !== undefined) {
+      if (block.id !== undefined) {
         const description = typeof input.description === 'string' && input.description ? input.description : input.command
-        cursor.launching.set(block.id, { description: description.slice(0, 200), command: input.command.slice(0, 400), startedAt: at })
+        cursor.launching.set(block.id, { description: description.slice(0, 200), command: input.command.slice(0, 400), startedAt: at, background: input.run_in_background === true })
       }
     }
   }

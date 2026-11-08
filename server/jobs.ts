@@ -2,8 +2,9 @@
 // Still running = no completion notice received, the output file still exists, and its last line isn't an exit code.
 // Measured 2026-11-07: Claude Code deletes the output file after a task ends; a task killed when its session restarted
 // gets no notice and its output file is gone too, so those are not shown at all.
-// Measured 2026-11-08: the output file stays after the task ends, with [exited with code N] as its last line. When the
-// notice was missed, that line is the fallback for telling the job ended
+// Measured 2026-11-08: the output file stays after the task ends, with [exited with code N] as its last line; a task
+// stopped with TaskStop gets no notice and its last line is [killed]. When the notice was missed or never came, that
+// line is the fallback for telling the job ended
 import { existsSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { connect } from 'node:net'
@@ -17,8 +18,8 @@ const PROBE_TIMEOUT_MS = 300
 const PROBE_CACHE_MS = 5_000
 // Terminal color control sequences, common in the last line of output
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
-// The line Claude Code appends to the output file when a task ends
-const EXIT_LINE = /^\[exited with code (\d+)\]$/
+// The line Claude Code appends to the output file when a task ends: an exit code, or [killed] when it was stopped
+const EXIT_LINE = /^\[(?:exited with code (\d+)|killed)\]$/
 
 /** The last non-empty line of the output file and when the file last changed; null if it can't be read */
 async function tailOf(path: string): Promise<{ line: string | null; modifiedAt: number } | null> {
@@ -58,7 +59,7 @@ export async function jobsOf(raw: Record<string, RawJob>, nameOf: (description: 
       if (read === null) continue
       const exit = read.line?.match(EXIT_LINE)
       if (exit) {
-        status = exit[1] === '0' ? 'completed' : 'failed'
+        status = exit[1] === undefined ? 'stopped' : exit[1] === '0' ? 'completed' : 'failed'
         endedAt = read.modifiedAt
       } else {
         tail = clip(read.line)
