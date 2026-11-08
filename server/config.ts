@@ -4,10 +4,10 @@
 import { existsSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { DEFAULT_CONTEXT_LINE } from '../shared/defaults.ts'
 import { isLang, type Lang } from '../shared/i18n/index.ts'
 
 const DEFAULT_PORT = 4317
-const DEFAULT_CONTEXT_LINE = 400_000
 
 /** Port of the Vite dev server (`npm run dev`); the API server accepts its Host header and the proxy lives in vite.config.ts */
 export const DEV_CLIENT_PORT = 5317
@@ -80,7 +80,7 @@ export const config = {
   claudeJson: join(customClaudeDir === undefined ? homedir() : resolve(customClaudeDir), '.claude.json'),
   /** FLIGHTSTRIP_LANG (en | zh): the language when nothing is saved in <state dir>/settings.json yet; null = follow the system locale */
   lang: langFromEnv('FLIGHTSTRIP_LANG'),
-  /** FLIGHTSTRIP_DEMO=1 (or `flightstrip --demo`): serve fictional sessions from server/demo.ts. Reads nothing from
+  /** FLIGHTSTRIP_DEMO=1 (or `flightstrip --demo`): serve fictional sessions from shared/demo.ts. Reads nothing from
    *  the Claude directory, never runs `claude`, keeps every write (groups, renames, retire) in memory */
   demo: switchFromEnv('FLIGHTSTRIP_DEMO', false),
   /** FLIGHTSTRIP_BRIEFS=off: no `claude -p` calls for goals, progress or job names */

@@ -41,6 +41,7 @@
     "dev": "concurrently -k -n server,web \"tsx watch server/index.ts\" \"vite\"",
     "build": "npm run build:client && npm run build:server",
     "build:client": "vite build",
+    "build:pages": "vite build --mode pages",
     "build:server": "vite build --config vite.server.config.ts",
     "prepack": "npm run build",
     "start": "npm run build && node bin/flightstrip.mjs --no-open",

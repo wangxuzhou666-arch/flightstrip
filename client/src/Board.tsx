@@ -3,7 +3,7 @@
 // Only two tabs: #/ overview (grouped the way you arranged it) and #/jobs background jobs.
 // The earlier Session page (split by state) and the pages page are gone; retired strips fold into the bottom of the overview.
 // The language toggle sits at the right end of the tabs row.
-import { type ReactNode, useEffect, useState } from 'react'
+import { Fragment, type ReactNode, useEffect, useState } from 'react'
 import { type Lang, langFromLocale, type MessageKey } from '../../shared/i18n/index.ts'
 import type { BackgroundJob, Snapshot } from '../../shared/types.ts'
 import { postLang } from './api.ts'
@@ -33,6 +33,11 @@ function Section({ title, count, children, action }: { title: string; count?: nu
       {children}
     </section>
   )
+}
+
+/** A message with `commands` in backticks: the backticks go, the command is set in <code> */
+function WithCode({ text }: { text: string }) {
+  return <>{text.split('`').map((part, i) => (i % 2 === 1 ? <code key={i}>{part}</code> : <Fragment key={i}>{part}</Fragment>))}</>
 }
 
 const JOB_STAGE = {
@@ -132,6 +137,7 @@ function Page({ snapshot, connection }: { snapshot: Snapshot | null; connection:
 
   return (
     <div className="page">
+      {__STATIC_DEMO__ && <div className="banner banner--plain banner--demo"><p><WithCode text={t('banner.sample')} /></p></div>}
       <header className="head">
         <div className="head-main">
           <h1 className="title">

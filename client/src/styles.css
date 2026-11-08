@@ -98,6 +98,8 @@ h1, h2, h3, h4, h5, p { margin: 0; }
 .banner p { flex: 1 1 20rem; }
 .banner--err { margin-top: 20px; background: color-mix(in srgb, var(--err) 10%, transparent); }
 .banner--plain { background: var(--module); }
+/* The static-demo notice sits above the header, so it needs room below it rather than above */
+.banner--demo { margin: 0 0 20px; }
 
 /* ---------- sections ---------- */
 .main { display: flex; flex-direction: column; gap: 28px; margin-top: 24px; }

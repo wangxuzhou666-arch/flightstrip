@@ -1,17 +1,19 @@
-// Demo mode (`flightstrip --demo` / FLIGHTSTRIP_DEMO=1): fictional sessions for trying the dashboard without any
-// Claude Code data, and for screenshots. Everything here is invented: the project is a made-up "acme-shop" shop.
+// Demo mode (`flightstrip --demo` / FLIGHTSTRIP_DEMO=1, and the static GitHub Pages build): fictional sessions for trying
+// the dashboard without any Claude Code data, and for screenshots. Everything here is invented: the project is a
+// made-up "acme-shop" shop.
 //
-// The fixtures are typed against shared/types.ts, so a field added to AgentStrip fails the type check here instead of
+// The fixtures are typed against types.ts, so a field added to AgentStrip fails the type check here instead of
 // silently missing from the demo. Surface labels, the "waiting for you" prefix, group ids and the bay ordering are NOT
-// duplicated here: collect.ts adds them to the strips below, the same way it does for real sessions.
+// duplicated here: board.ts adds them to the strips below, the same way collect.ts does for real sessions.
 // The fixture text itself (names, goals, progress) is English and shown as is in both languages; only text that is page
 // chrome, like the line after a retire in the demo, goes through the dictionary.
+// It sits in shared/ and imports nothing from Node, because the browser build imports it too.
 //
 // Time: every timestamp is "minutes before BASE", where BASE follows the clock but snaps back every LOOP_MS. So running
 // jobs and "waiting for 8 min" counters tick up while you watch, and a demo left open all day still looks fresh instead
 // of drifting out of the 3-hour window.
-import type { AgentStrip, SessionGroup, UsageReading } from '../shared/types.ts'
-import { serverT } from './lang.ts'
+import type { Translate } from './i18n/index.ts'
+import type { AgentStrip, SessionGroup, UsageReading } from './types.ts'
 
 const MINUTE = 60_000
 const LOOP_MS = 12 * MINUTE
@@ -95,14 +97,14 @@ function pullRequest(number: number, state: string, review: string | null, check
 }
 
 /** The one place the fixture strips are built; `now` is the real clock, `base` the looping one */
-export function demoStrips(now: number): DemoStrip[] {
+export function demoStrips(now: number, t: Translate): DemoStrip[] {
   const base = now - ((now - STARTED_AT) % LOOP_MS)
   const ago = (minutes: number): number => base - minutes * MINUTE
   const strips = buildStrips(now, ago)
-  return strips.map((strip) => applyWrites(strip))
+  return strips.map((strip) => applyWrites(strip, t))
 }
 
-function applyWrites(strip: DemoStrip): DemoStrip {
+function applyWrites(strip: DemoStrip, t: Translate): DemoStrip {
   const name = renamed.get(strip.sessionId) ?? strip.name
   const stopped = stoppedAt.get(strip.sessionId)
   if (stopped === undefined) return { ...strip, name }
@@ -111,7 +113,7 @@ function applyWrites(strip: DemoStrip): DemoStrip {
     name,
     stateKind: 'idle',
     bay: 'done',
-    now: serverT('demo.stopped'),
+    now: t('demo.stopped'),
     stateSince: null,
     updatedAt: stopped,
     segments: strip.segments.map((segment) => ({ ...segment, to: Math.min(segment.to, stopped) })),

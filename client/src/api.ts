@@ -17,15 +17,21 @@ async function post(path: string, body: Record<string, unknown>): Promise<Record
   throw new Error(reply.error ?? shownTranslator()('error.http', { status: res.status }))
 }
 
+// Every write below has a static-build branch (see globals.d.ts): there it goes to the in-browser board and no request is made.
+// The /api paths sit only in the other branch, which is how the pages build ends up without any of them.
+
 export async function postAction(sessionId: string, action: SessionAction, body: Record<string, unknown> = {}): Promise<void> {
-  await post(`/api/sessions/${sessionId}/${action}`, body)
+  if (__STATIC_DEMO__) (await import('./staticDemo.ts')).applyAction(sessionId, action, body)
+  else await post(`/api/sessions/${sessionId}/${action}`, body)
 }
 
 export async function postGroup(op: GroupOp, body: Record<string, unknown>): Promise<void> {
-  await post(`/api/groups/${op}`, body)
+  if (__STATIC_DEMO__) (await import('./staticDemo.ts')).applyGroupOp(op, body)
+  else await post(`/api/groups/${op}`, body)
 }
 
 /** Saves the language on the server; the next snapshot carries it back and the page switches then */
 export async function postLang(lang: Lang): Promise<void> {
-  await post('/api/settings', { lang })
+  if (__STATIC_DEMO__) (await import('./staticDemo.ts')).applyLang(lang)
+  else await post('/api/settings', { lang })
 }

@@ -8,7 +8,7 @@
 [![license](https://img.shields.io/github/license/wangxuzhou666-arch/flightstrip)](LICENSE)
 ![macOS](https://img.shields.io/badge/macOS-supported-lightgrey)
 
-[English](README.md) · 中文
+**[在线试用演示](https://wangxuzhou666-arch.github.io/flightstrip/)** · [English](README.md) · 中文
 
 <img src="docs/hero-zh.png" alt="flightstrip 看板：session 按项目分组，一个 session 一张纸条，等你处理的排在最上面" width="100%">
 

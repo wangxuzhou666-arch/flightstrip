@@ -7,22 +7,16 @@ import { existsSync } from 'node:fs'
 import { appendFile, mkdir, open, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { ActionError, cleanSessionName } from '../shared/actionError.ts'
+import { isRunning } from '../shared/board.ts'
+import { isDemoSession, renameDemoSession, stopDemoSession } from '../shared/demo.ts'
 import type { AgentStrip } from '../shared/types.ts'
 import { config } from './config.ts'
-import { isDemoSession, renameDemoSession, stopDemoSession } from './demo.ts'
 import { serverT } from './lang.ts'
 import { locateTranscript } from './transcript.ts'
 
 const runFile = promisify(execFile)
 const RETIRED_FILE = join(config.stateDir, 'retired.json')
-const NAME_LIMIT = 80
-
-/** A business error carrying an HTTP status code: the page shows its message as-is */
-export class ActionError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message)
-  }
-}
 
 // sessionId → time of retirement
 const retired = new Map<string, number>()
@@ -48,8 +42,7 @@ async function saveRetired(): Promise<void> {
 
 export async function retire(strip: AgentStrip): Promise<void> {
   // Only live background sessions need a stop; finished or stopped ones are simply collapsed
-  const alive = strip.stateKind === 'working' || strip.stateKind === 'needs'
-  if (strip.kind === 'background' && alive) {
+  if (strip.kind === 'background' && isRunning(strip)) {
     if (!/^[0-9a-f]{8}$/.test(strip.shortId)) throw new ActionError(400, serverT('error.badBackgroundId', { id: strip.shortId }))
     if (config.demo) stopDemoSession(strip.sessionId, Date.now())
     else await runFile('claude', ['stop', strip.shortId], { timeout: 20_000 })
@@ -77,10 +70,7 @@ async function endsWithNewline(path: string): Promise<boolean> {
 }
 
 export async function renameSession(sessionId: string, rawName: string): Promise<string> {
-  const name = rawName.trim()
-  if (name === '' || name.length > NAME_LIMIT || /[\r\n]/.test(name)) {
-    throw new ActionError(400, serverT('error.sessionName', { max: NAME_LIMIT }))
-  }
+  const name = cleanSessionName(rawName, serverT)
   if (config.demo) {
     if (!isDemoSession(sessionId)) throw new ActionError(404, serverT('error.transcriptNotFound'))
     renameDemoSession(sessionId, name)

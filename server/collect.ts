@@ -1,12 +1,13 @@
 // Merges the data sources into one snapshot: one strip per session.
 import { existsSync, statSync } from 'node:fs'
 import { basename } from 'node:path'
-import type { MessageKey } from '../shared/i18n/index.ts'
-import type { AgentStrip, BackgroundJob, Bay, RetiredRow, Segment, Snapshot, StateKind, TimelineEvent, TodoItem, UsageReading } from '../shared/types.ts'
+import { arrange, BAY_ORDER, demoBoardStrips, needsLine, surfaceOf } from '../shared/board.ts'
+import { WINDOW_MS } from '../shared/defaults.ts'
+import { demoUsage } from '../shared/demo.ts'
+import type { AgentStrip, BackgroundJob, Bay, Segment, Snapshot, StateKind, TimelineEvent, TodoItem, UsageReading } from '../shared/types.ts'
 import { type AgentListing, type JobTimelineEntry, listAgents, readInteractiveSession, readJobState, readJobTimeline } from './agents.ts'
 import { type BriefJob, briefOf, jobNameOf, type RecentLine, requestBrief } from './brief.ts'
 import { config } from './config.ts'
-import { demoStrips, demoUsage, type DemoStrip } from './demo.ts'
 import { groupOf, listGroups, ungroupedAt } from './groups.ts'
 import { currentLang, serverT } from './lang.ts'
 import { jobsOf, pagesOf } from './jobs.ts'
@@ -15,37 +16,9 @@ import { readSessionTodos } from './sessionTodos.ts'
 import { describeAction, digestTranscript, readSubagents, type TranscriptDigest } from './transcript.ts'
 import { readUsage } from './usage.ts'
 
-export const WINDOW_MS = 3 * 60 * 60 * 1000
 // Two agent outputs closer together than this count as one continuous stretch of work
 const ACTIVITY_GAP_MS = 2 * 60 * 1000
 const TEXT_LIMIT = 280
-
-// What `claude agents` says a session waits on → the dictionary key of its wording; unknown values are shown as they are
-const WAITING_KEYS = {
-  'permission prompt': 'waiting.permission',
-  'input needed': 'waiting.input',
-  'sandbox request': 'waiting.sandbox',
-  'worker request': 'waiting.worker',
-  'dialog open': 'waiting.dialog',
-} as const satisfies Record<string, MessageKey>
-
-const SURFACE_KEYS = {
-  'claude-vscode': 'surface.vscode',
-  cli: 'surface.cli',
-  'claude-desktop': 'surface.desktop',
-} as const satisfies Record<string, MessageKey>
-
-/** Own keys only: a value like "constructor" from a session file must not resolve to something on Object.prototype */
-function lookup<T extends Record<string, MessageKey>>(table: T, name: string): T[keyof T] | undefined {
-  return Object.hasOwn(table, name) ? table[name as keyof T] : undefined
-}
-
-/** Where a session runs, as shown on the card; entrypoint null = background session */
-function surfaceOf(entrypoint: string | null): string {
-  if (entrypoint === null) return serverT('surface.background')
-  const key = lookup(SURFACE_KEYS, entrypoint)
-  return key === undefined ? entrypoint || serverT('surface.interactive') : serverT(key)
-}
 
 // State comes only from official sources. Measured 2026-11-07: with AskUserQuestion pending in VSCode, status = waiting
 // and waitingFor = input needed, so there is no need to infer it from the transcript
@@ -145,15 +118,8 @@ function bandSegments(runs: Segment[], start: number): Segment[] {
   return shown
 }
 
-/** "Waiting for your answer: <the question>" */
-function needsLine(waitingFor: string | undefined, ask: string): string {
-  const key = waitingFor ? lookup(WAITING_KEYS, waitingFor) : undefined
-  const waiting = key === undefined ? waitingFor || null : serverT(key)
-  return [waiting, ask].filter(Boolean).join(serverT('sep.colon')) || serverT('now.waiting')
-}
-
 function nowLine(kind: StateKind, listing: AgentListing, jobDetail: string | null, jobNeeds: string | null, digest: TranscriptDigest | null): string {
-  if (kind === 'needs') return needsLine(listing.waitingFor, oneLine(jobNeeds ?? digest?.lastAgentText ?? jobDetail))
+  if (kind === 'needs') return needsLine(listing.waitingFor, oneLine(jobNeeds ?? digest?.lastAgentText ?? jobDetail), serverT)
   if (kind === 'working') {
     const lastAction = digest?.lastAction ? describeAction(digest.lastAction, serverT) : null
     return oneLine(jobDetail ?? lastAction ?? digest?.lastAgentText) || serverT('now.working')
@@ -274,7 +240,7 @@ async function buildStrip(listing: AgentListing, now: number): Promise<Built> {
     sessionId: listing.sessionId,
     shortId: listing.id,
     kind: listing.kind,
-    surface: surfaceOf(background ? null : session?.entrypoint ?? ''),
+    surface: surfaceOf(background ? null : session?.entrypoint ?? '', serverT),
     name,
     project: await projectOf(listing.cwd),
     cwd: listing.cwd,
@@ -311,14 +277,6 @@ function bareStrip(listing: AgentListing): AgentStrip {
   }
 }
 
-const BAY_ORDER: Bay[] = ['needs', 'working', 'done', 'idle']
-
-/** Order inside a bay must be stable: running and waiting strips sort by start time, not by latest activity,
- *  otherwise they'd swap places on every output. Finished and idle ones sort by latest activity: just-finished on top */
-function orderInBay(strip: AgentStrip): number {
-  return strip.bay === 'done' || strip.bay === 'idle' ? strip.updatedAt ?? 0 : strip.startedAt ?? 0
-}
-
 let lastCliFailure: string | null = null
 
 /** "Command failed" says nothing; the real reason is in claude's stderr. The same error is logged once, so it doesn't print a line every 3 seconds */
@@ -339,11 +297,6 @@ export interface Collected {
   revived: string[]
 }
 
-/** A retired strip is hidden only while idle or finished; one that moved again must not stay hidden, or a waiting-for-you strip would be missed */
-function isActive(strip: AgentStrip): boolean {
-  return strip.bay === 'needs' || strip.bay === 'working'
-}
-
 // The dashboard's own page doesn't count as a page a session opened
 const OWN_PORT = config.port
 
@@ -353,32 +306,20 @@ const OWN_CWD = config.stateDir
 
 /** Hides retired strips, requests briefs for the ones on display and wraps everything into a Snapshot */
 function assemble(allStrips: AgentStrip[], built: ReadonlyMap<string, Built>, retired: ReadonlyMap<string, number>, now: number, usage: UsageReading | null): Collected {
-  allStrips.sort((a, b) => BAY_ORDER.indexOf(a.bay) - BAY_ORDER.indexOf(b.bay) || orderInBay(b) - orderInBay(a))
-
-  const hidden = (strip: AgentStrip) => retired.has(strip.sessionId) && !isActive(strip)
-  const retiredRows: RetiredRow[] = allStrips.filter(hidden).map((strip) => ({
-    sessionId: strip.sessionId, name: strip.name, kind: strip.kind, retiredAt: retired.get(strip.sessionId) as number,
-  }))
-  const shown = allStrips.filter((s) => !hidden(s))
+  const { shown, retiredRows, revived } = arrange(allStrips, retired)
   // Only strips on display get todos and progress written; retired ones cost nothing
   for (const strip of shown) {
     const source = built.get(strip.sessionId)
     if (source !== undefined) requestBrief(briefJobOf(strip, source.opening, source.manual))
   }
   const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: shown, retired: retiredRows, groups: listGroups(), ungroupedAt: ungroupedAt(), usage, error: null, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
-  const revived = allStrips.filter((s) => retired.has(s.sessionId) && isActive(s)).map((s) => s.sessionId)
   return { snapshot, allStrips, revived }
 }
 
-/** Demo mode: the fixture strips from demo.ts go through the same ordering, retire and group logic as real ones */
+/** Demo mode: the fixture strips from shared/demo.ts go through the same ordering, retire and group logic as real ones */
 function collectDemo(retired: ReadonlyMap<string, number>): Collected {
   const now = Date.now()
-  const strips = demoStrips(now).map(({ entrypoint, waitingFor, ...strip }: DemoStrip): AgentStrip => ({
-    ...strip,
-    surface: surfaceOf(entrypoint),
-    now: waitingFor === undefined ? strip.now : needsLine(waitingFor, strip.now),
-    groupId: groupOf(strip.sessionId),
-  }))
+  const strips = demoBoardStrips(now, serverT, groupOf)
   // Briefs are not requested: nothing is built from files, so there is nothing for Haiku to read
   return assemble(strips, new Map(), retired, now, demoUsage(now))
 }

@@ -11,6 +11,7 @@ export const zh: Dictionary = {
   'tabs.overview': '总览',
   'tabs.jobs': '后台实验',
   'lang.label': '语言',
+  'banner.sample': '这些是示例 session。在你的电脑上运行 `npx flightstrip` 就能看到你自己的。',
   'banner.agentsError': '读不到 session 列表：{error}。确认终端里能运行 claude agents --json。',
   'common.cancel': '取消',
   'common.save': '保存',

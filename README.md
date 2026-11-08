@@ -8,7 +8,7 @@
 [![license](https://img.shields.io/github/license/wangxuzhou666-arch/flightstrip)](LICENSE)
 ![macOS](https://img.shields.io/badge/macOS-supported-lightgrey)
 
-English · [中文](README.zh-CN.md)
+**[Try the live demo](https://wangxuzhou666-arch.github.io/flightstrip/)** · English · [中文](README.zh-CN.md)
 
 <img src="docs/hero.png" alt="flightstrip board: sessions grouped by project, one strip each, with the session that needs you on top" width="100%">
 

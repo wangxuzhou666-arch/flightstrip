@@ -19,6 +19,7 @@ export const en = {
   'tabs.overview': 'Overview',
   'tabs.jobs': 'Background jobs',
   'lang.label': 'Language',
+  'banner.sample': 'Sample sessions. Run `npx flightstrip` on your machine to see yours.',
   'banner.agentsError': 'Could not read the session list: {error}. Check that `claude agents --json` works in a terminal.',
   'common.cancel': 'Cancel',
   'common.save': 'Save',
