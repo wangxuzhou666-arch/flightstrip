@@ -90,14 +90,17 @@ npm i -g flightstrip && flightstrip service install
 - macOS. Linux should work but isn't tested yet.
 - flightstrip reads files Claude Code writes for itself, not a public API. If an update changes them and a strip looks wrong, please [open an issue](https://github.com/wangxuzhou666-arch/flightstrip/issues).
 
-## Develop
+## Make it yours
+
+Want a different look, or something else on each strip? Fork it. The code is small and every color is one variable.
 
 ```bash
 git clone https://github.com/wangxuzhou666-arch/flightstrip
 cd flightstrip && npm install
-npm run dev     # server with reload + Vite client
-npm test
+npm run dev:demo    # sample sessions with hot reload on http://127.0.0.1:5317
 ```
+
+[CONTRIBUTING.md](CONTRIBUTING.md) maps each part of the board to the file that draws it. Pull requests and issues are welcome.
 
 ## License
 

@@ -39,6 +39,7 @@
   },
   "scripts": {
     "dev": "concurrently -k -n server,web \"tsx watch server/index.ts\" \"vite\"",
+    "dev:demo": "FLIGHTSTRIP_DEMO=1 npm run dev",
     "build": "npm run build:client && npm run build:server",
     "build:client": "vite build",
     "build:pages": "vite build --mode pages",

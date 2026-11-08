@@ -90,14 +90,17 @@ npm i -g flightstrip && flightstrip service install
 - macOS。Linux 应该能用，但还没测过。
 - flightstrip 读的是 Claude Code 写给自己用的文件，不是公开 API。如果某次升级后纸条显示不对，请[提 issue](https://github.com/wangxuzhou666-arch/flightstrip/issues)。
 
-## 开发
+## 改成你想要的样子
+
+想换个样式，或者让纸条显示别的信息？直接 fork。代码不多，每种颜色都是一个变量。
 
 ```bash
 git clone https://github.com/wangxuzhou666-arch/flightstrip
 cd flightstrip && npm install
-npm run dev     # 带热更新的服务端 + Vite 客户端
-npm test
+npm run dev:demo    # 用示例 session 启动，带热更新，地址 http://127.0.0.1:5317
 ```
+
+[CONTRIBUTING.md](CONTRIBUTING.md)（英文）列出了看板上每一块对应哪个文件。欢迎提 PR 和 issue。
 
 ## 许可证
 
