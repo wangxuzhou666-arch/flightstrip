@@ -52,7 +52,8 @@ export interface RawJob {
   description: string
   command: string
   startedAt: number
-  /** Output file path Claude Code returned to the session; the file is deleted after the task ends */
+  /** Output file path Claude Code returned to the session. As of 2026-11-07 it was deleted after the task ended; since
+   *  2026-11-08 it stays, and its last line is [exited with code N] */
   outputPath: string | null
   status: JobStatus | null
   endedAt: number | null
@@ -64,7 +65,9 @@ export interface RawJob {
 const WORKTREE_PATH = /(\/[^\s"'`\\]+?\/\.claude\/worktrees\/[\w.-]+)(?![\w.*$?{}[\]-])/g
 // Format observed 2026-11-07: the tool_result of a background command reads
 // "Command running in background with ID: <id>. Output is being written to: <path>";
-// when it ends, the session receives a user entry containing <task-notification>, with status completed / failed / stopped
+// when it ends, the session receives a notice containing <task-notification>, with status completed / failed / stopped.
+// Measured 2026-11-08: the notice is no longer a user entry but a queue-operation entry (content) and an attachment entry
+// (attachment.type is queued_command, text in prompt)
 const JOB_STARTED = /with ID: (\w+)\.?(?:[\s\S]*?written to: (\S+?)\.?(?:\s|$))?/
 const JOB_ENDED = /<task-id>(\w+)<\/task-id>[\s\S]*?<status>(\w+)<\/status>/g
 // Local pages: localhost / 127.0.0.1 with a port. API and health-check endpoints don't count as pages
@@ -276,16 +279,31 @@ function noteUserBlocks(cursor: TranscriptCursor, row: Record<string, unknown>, 
       cursor.launching.delete(block.tool_use_id)
       const started = resultText(block).match(JOB_STARTED)
       if (started !== null) digest.jobs[started[1]] = { ...launch, id: started[1], outputPath: started[2] ?? null, status: null, endedAt: null }
-    } else if (block.type === 'text' && block.text?.includes('<task-notification>')) {
-      for (const [, id, status] of block.text.matchAll(JOB_ENDED)) {
-        const job = digest.jobs[id]
-        // The start entry lies before the tail we read: no description, so it isn't recorded
-        if (job === undefined) continue
-        job.status = ENDED_STATUS[status] ?? 'completed'
-        job.endedAt = at
-      }
+    } else if (block.type === 'text' && block.text !== undefined) {
+      noteJobEnds(digest, block.text, at)
     }
   }
+}
+
+/** Reads which background jobs a completion notice says ended, and how */
+function noteJobEnds(digest: TranscriptDigest, text: string, at: number): void {
+  if (!text.includes('<task-notification>')) return
+  for (const [, id, status] of text.matchAll(JOB_ENDED)) {
+    const job = digest.jobs[id]
+    // The start entry lies before the tail we read: no description, so it isn't recorded. One notice shows up several
+    // times (enqueue, attachment, dequeue); only the first counts
+    if (job === undefined || job.status !== null) continue
+    job.status = ENDED_STATUS[status] ?? 'completed'
+    job.endedAt = at
+  }
+}
+
+/** A completion notice in the newer format: a queue-operation entry's content, or a queued_command attachment's prompt */
+function queuedNotice(row: Record<string, unknown>): string | null {
+  if (row.type === 'queue-operation') return typeof row.content === 'string' ? row.content : null
+  if (row.type !== 'attachment') return null
+  const attachment = row.attachment as { type?: unknown; prompt?: unknown } | undefined
+  return attachment?.type === 'queued_command' && typeof attachment.prompt === 'string' ? attachment.prompt : null
 }
 
 function noteWorktrees(digest: TranscriptDigest, block: ContentBlock, at: number): void {
@@ -311,6 +329,11 @@ function applyLine(cursor: TranscriptCursor, line: string): void {
     return
   }
   const at = Date.parse(row.timestamp)
+  const notice = queuedNotice(row)
+  if (notice !== null) {
+    noteJobEnds(digest, notice, at)
+    return
+  }
   if (row.type === 'user') {
     noteUserBlocks(cursor, row, at)
     if (blocksOf(row).some((b) => b.type === 'tool_result')) {

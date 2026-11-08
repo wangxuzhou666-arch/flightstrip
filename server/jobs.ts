@@ -1,7 +1,9 @@
 // Background jobs and local pages: turns raw transcript records into what the strip shows.
-// Still running = no completion notice received and the output file still exists (measured 2026-11-07: Claude Code
-// deletes the output file after a task ends; a task killed when its session restarted gets no notice and its output
-// file is gone too, so those are not shown at all)
+// Still running = no completion notice received, the output file still exists, and its last line isn't an exit code.
+// Measured 2026-11-07: Claude Code deletes the output file after a task ends; a task killed when its session restarted
+// gets no notice and its output file is gone too, so those are not shown at all.
+// Measured 2026-11-08: the output file stays after the task ends, with [exited with code N] as its last line. When the
+// notice was missed, that line is the fallback for telling the job ended
 import { existsSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { connect } from 'node:net'
@@ -15,9 +17,11 @@ const PROBE_TIMEOUT_MS = 300
 const PROBE_CACHE_MS = 5_000
 // Terminal color control sequences, common in the last line of output
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
+// The line Claude Code appends to the output file when a task ends
+const EXIT_LINE = /^\[exited with code (\d+)\]$/
 
-/** The last non-empty line of the output file; null if it can't be read */
-async function lastLine(path: string): Promise<string | null> {
+/** The last non-empty line of the output file and when the file last changed; null if it can't be read */
+async function tailOf(path: string): Promise<{ line: string | null; modifiedAt: number } | null> {
   let handle
   try {
     handle = await open(path, 'r')
@@ -25,34 +29,50 @@ async function lastLine(path: string): Promise<string | null> {
     return null
   }
   try {
-    const { size } = await handle.stat()
+    const { size, mtimeMs } = await handle.stat()
     const length = Math.min(size, TAIL_BYTES)
     const buffer = Buffer.alloc(length)
     await handle.read(buffer, 0, length, size - length)
     const lines = buffer.toString('utf8').replace(ANSI, '').split(/\r?\n|\r/).map((line) => line.trim()).filter(Boolean)
-    const last = lines.at(-1)
-    if (last === undefined) return null
-    return last.length > TAIL_LIMIT ? `${last.slice(0, TAIL_LIMIT)}…` : last
+    return { line: lines.at(-1) ?? null, modifiedAt: mtimeMs }
   } finally {
     await handle.close()
   }
 }
 
+function clip(line: string | null): string | null {
+  if (line === null) return null
+  return line.length > TAIL_LIMIT ? `${line.slice(0, TAIL_LIMIT)}…` : line
+}
+
 export async function jobsOf(raw: Record<string, RawJob>, nameOf: (description: string) => string): Promise<BackgroundJob[]> {
   const jobs: BackgroundJob[] = []
   for (const job of Object.values(raw)) {
-    const running = job.status === null
-    // No notice received and the output file is gone too: killed by a restart, state unclear, so not shown
-    if (running && (job.outputPath === null || !existsSync(job.outputPath))) continue
+    let status = job.status
+    let endedAt = job.endedAt
+    let tail: string | null = null
+    if (status === null) {
+      // No notice received and the output file is gone too: killed by a restart, state unclear, so not shown
+      if (job.outputPath === null || !existsSync(job.outputPath)) continue
+      const read = await tailOf(job.outputPath)
+      if (read === null) continue
+      const exit = read.line?.match(EXIT_LINE)
+      if (exit) {
+        status = exit[1] === '0' ? 'completed' : 'failed'
+        endedAt = read.modifiedAt
+      } else {
+        tail = clip(read.line)
+      }
+    }
     jobs.push({
       id: job.id,
       name: nameOf(job.description),
       description: job.description,
       command: job.command,
-      status: job.status ?? 'running',
+      status: status ?? 'running',
       startedAt: job.startedAt,
-      endedAt: job.endedAt,
-      tail: running ? await lastLine(job.outputPath as string) : null,
+      endedAt,
+      tail,
     })
   }
   return jobs.sort((a, b) => b.startedAt - a.startedAt)

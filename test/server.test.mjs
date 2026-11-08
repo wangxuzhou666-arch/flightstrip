@@ -399,3 +399,61 @@ test('CLAUDE_CONFIG_DIR: sessions and transcripts come from it, and the text rea
   assert.equal(strip(second).surface, 'Terminal')
   server.run.child.kill()
 })
+
+test('background jobs: every completion signal ends a job, and only jobs with no ending show as running', async () => {
+  const box = sandbox()
+  const custom = join(box.root, 'claude-config')
+  const tasks = join(box.root, 'tasks')
+  const sessionId = 'cafe0002-0000-4000-8000-00000000cafe'
+  mkdirSync(join(custom, 'sessions'), { recursive: true })
+  mkdirSync(join(custom, 'projects', 'lane'), { recursive: true })
+  mkdirSync(tasks)
+  writeFileSync(join(custom, 'sessions', `${process.pid}.json`), JSON.stringify({ sessionId, pid: process.pid, name: 'JOBS-SESSION', cwd: box.home, startedAt: Date.now(), status: 'busy', entrypoint: 'cli' }))
+  const at = new Date().toISOString()
+  const notice = (id, status) => `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>tu-${id}</tool-use-id>\n<output-file>${join(tasks, `${id}.output`)}</output-file>\n<status>${status}</status>\n<summary>Background command finished</summary>\n</task-notification>`
+  // id → what its output file holds (null = no file) and how its end is recorded
+  const jobs = {
+    oldUserRow: { output: 'done\n[exited with code 0]\n' },
+    attachmentRow: { output: 'sh: foo: command not found\n[exited with code 127]\n' },
+    queueRow: { output: 'ok\n[exited with code 0]\n' },
+    exitZero: { output: 'built\n[exited with code 0]\n' },
+    exitOne: { output: 'Error: boom\n[exited with code 1]\n' },
+    stillGoing: { output: 'step 3 of 10\n' },
+    fileGone: { output: null },
+  }
+  const rows = []
+  for (const [id, job] of Object.entries(jobs)) {
+    if (job.output !== null) writeFileSync(join(tasks, `${id}.output`), job.output)
+    rows.push(
+      { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: `tu-${id}`, name: 'Bash', input: { command: `run ${id}`, description: `Job ${id}`, run_in_background: true } }], usage: { input_tokens: 10 } } },
+      { type: 'user', timestamp: at, message: { content: [{ type: 'tool_result', tool_use_id: `tu-${id}`, content: `Command running in background with ID: ${id}. Output is being written to: ${join(tasks, `${id}.output`)}. You will be notified when it completes` }] } },
+    )
+  }
+  // The format observed 2026-11-07: a user entry
+  rows.push({ type: 'user', timestamp: at, message: { content: [{ type: 'text', text: notice('oldUserRow', 'completed') }] } })
+  // The format observed 2026-11-08: an attachment entry, and queue-operation entries (enqueue, then remove)
+  rows.push({ type: 'attachment', timestamp: at, isSidechain: false, attachment: { type: 'queued_command', prompt: notice('attachmentRow', 'failed'), commandMode: 'task-notification' } })
+  rows.push({ type: 'queue-operation', operation: 'enqueue', timestamp: at, content: notice('queueRow', 'completed') })
+  rows.push({ type: 'queue-operation', operation: 'remove', timestamp: at, content: notice('queueRow', 'completed') })
+  // A notice for a job whose start isn't in the transcript adds nothing
+  rows.push({ type: 'queue-operation', operation: 'enqueue', timestamp: at, content: notice('neverStarted', 'completed') })
+  writeFileSync(join(custom, 'projects', 'lane', `${sessionId}.jsonl`), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: custom }, box)
+  const strip = (snapshot) => snapshot.strips.find((s) => s.name === 'JOBS-SESSION')
+  const snapshot = await snapshotWhere(server.url, (s) => (strip(s)?.jobs.length ?? 0) > 0)
+  const shown = Object.fromEntries(strip(snapshot).jobs.map((job) => [job.id, job]))
+  assert.deepEqual(Object.keys(shown).sort(), ['attachmentRow', 'exitOne', 'exitZero', 'oldUserRow', 'queueRow', 'stillGoing'], 'a job whose output file is gone and that got no notice is not shown')
+  const statuses = Object.fromEntries(Object.entries(shown).map(([id, job]) => [id, job.status]))
+  assert.deepEqual(statuses, { oldUserRow: 'completed', attachmentRow: 'failed', queueRow: 'completed', exitZero: 'completed', exitOne: 'failed', stillGoing: 'running' })
+  for (const [id, job] of Object.entries(shown)) {
+    if (id === 'stillGoing') {
+      assert.equal(job.endedAt, null)
+      assert.equal(job.tail, 'step 3 of 10', 'a running job shows its last line of output')
+    } else {
+      assert.equal(typeof job.endedAt, 'number', `${id} has an end time`)
+      assert.equal(job.tail, null, `${id} shows no live output line`)
+    }
+  }
+  server.run.child.kill()
+})
