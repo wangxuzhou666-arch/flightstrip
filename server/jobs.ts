@@ -140,13 +140,17 @@ interface Shown {
 }
 
 /** Jobs whose output ends with an exit line. No process writing it: the line ends the job, and that is written back to
- *  the raw record (the file isn't read again, a long-ended job is cleared on time, and a later official notice can still
- *  correct it). A process still writing it: the job is running. If lsof failed this time, the line is shown as the
- *  status but not written back, and the next pass checks again */
+ *  the raw record (the file isn't read again, a long-ended job is cleared on time, and a later official notice or a
+ *  later write to the file can still correct it). A process still writing it: the job is running. lsof failed this
+ *  time: no conclusion yet, so it still shows as running and the next pass checks again. No lsof on this machine: the
+ *  line is all there is, so a job whose last line happens to be an exit line and that then stays silent shows as ended
+ *  until it writes again */
 async function confirmEnded(jobs: RawJob[]): Promise<Shown[]> {
   const paths = jobs.map((job) => job.outputPath as string)
   const real = await Promise.all(paths.map((path) => realpath(path).catch(() => path)))
   const now = Date.now()
+  // Expired entries are removed: once a job ends with a notice its file isn't checked again, so they would pile up
+  for (const [path, at] of heldAt) if (now - at >= HELD_RECHECK_MS) heldAt.delete(path)
   const recentlyHeld = (path: string) => now - (heldAt.get(path) ?? -Infinity) < HELD_RECHECK_MS
   const toProbe = real.filter((path) => !recentlyHeld(path))
   const written = toProbe.length === 0 ? new Set<string>() : await writtenFiles(toProbe)
@@ -169,7 +173,7 @@ async function confirmEnded(jobs: RawJob[]): Promise<Shown[]> {
     }
     const status: JobStatus = exit[1] === undefined ? 'stopped' : exit[1] === '0' ? 'completed' : 'failed'
     if (written === 'failed') {
-      shown.push({ job: { ...job, status, endedAt: read.modifiedAt }, tail: null })
+      shown.push({ job, tail: clip(read.line) })
       continue
     }
     job.status = status
