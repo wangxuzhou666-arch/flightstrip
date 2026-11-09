@@ -102,6 +102,8 @@ export interface AgentStrip {
   todos: TodoItem[] | null
   /** session = written by the session itself via todo.mjs; haiku = extracted from your opening messages */
   todoSource: 'session' | 'haiku' | null
+  /** Finished todos that are no longer in `todos`: todo.mjs keeps only the last few finished ones. 0 for Haiku's list */
+  todosDoneEarlier: number
   /** Plain-language summary of the latest progress */
   progress: string | null
   progressAt: number | null

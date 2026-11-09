@@ -6,7 +6,9 @@
 // Claude Code passes {"session_id": …} on stdin and injects whatever this prints on stdout into the session's context:
 //   no checklist yet -> ask for one: "if this takes several steps, write 2-6 plain-language goals with `set`".
 //                       Whether to write one is the model's call: single-step tasks and Q&A don't need it.
-//   checklist exists -> show it numbered with ✓/☐ and say to run `done N` when an item is finished (no `show` first).
+//   checklist exists -> show it with ✓/☐ and the numbers todo.mjs gave each item, and say to run `done N` when an item
+//                       is finished (no `show` first). Numbers have gaps once old finished items drop off; that is
+//                       expected, since todo.mjs never renumbers.
 // Silent when: the input is not JSON, session_id is not a UUID shape, or todo.mjs is not next to this file.
 // A corrupt checklist file counts as "none yet": the next `set` replaces the whole file.
 // Only goals are handled here; progress, background jobs and pages are read from the transcript by the dashboard.
@@ -45,10 +47,12 @@ const REMINDERS = {
   en: {
     ask: (command) => `[flightstrip-todo] This session has no goal checklist on the flightstrip dashboard yet. If this task takes several steps, first write the final goals of this session as 2–6 plain-language items: ${command} set "…" "…". Skip it for single-step or mechanical tasks and plain Q&A.`,
     show: (listing, command) => `[flightstrip-todo] This session's goal checklist on the flightstrip dashboard: ${listing}. When you finish an item this turn, run ${command} done N; if the goals change, use add to append or set to replace the whole list.`,
+    earlier: (count) => `(${count} earlier finished ${count === 1 ? 'item' : 'items'} not listed)`,
   },
   zh: {
     ask: (command) => `[flightstrip-todo] 这个 session 在 flightstrip 看板上还没有目标清单。如果这个任务要分好几步，先把这个 session 的最终目标写成 2–6 条大白话：${command} set "…" "…"。单步或机械的任务、纯问答就不用写了。`,
     show: (listing, command) => `[flightstrip-todo] 这个 session 在 flightstrip 看板上的目标清单：${listing}。这一轮做完某条就运行 ${command} done N；目标有变就用 add 追加，或用 set 整份替换。`,
+    earlier: (count) => `（更早完成的 ${count} 条未列出）`,
   },
 }
 
@@ -77,16 +81,20 @@ function todoCommand() {
   return `node ${home === undefined ? TODO_SCRIPT : `~${TODO_SCRIPT.slice(home.length)}`}`
 }
 
-/** The saved items; [] for a missing file, a corrupt one, or items that don't look like todo.mjs wrote them */
-function savedItems(sessionId) {
+/**
+ * The saved items and how many finished ones dropped off; no items for a missing file, a corrupt one, or items that
+ * don't look like todo.mjs wrote them
+ */
+function savedList(sessionId) {
   let saved
   try {
     saved = JSON.parse(readFileSync(join(TODO_DIR, `${sessionId}.json`), 'utf8'))
   } catch {
-    return []
+    return { items: [], doneEarlier: 0 }
   }
   const items = saved?.items
-  return Array.isArray(items) && items.every((item) => typeof item?.text === 'string') ? items : []
+  if (!Array.isArray(items) || !items.every((item) => typeof item?.text === 'string')) return { items: [], doneEarlier: 0 }
+  return { items, doneEarlier: Number.isInteger(saved.doneEarlier) ? saved.doneEarlier : 0 }
 }
 
 /** The text to inject, or null to stay silent */
@@ -101,11 +109,13 @@ function reminderFor(input) {
   if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return null
   if (!existsSync(TODO_SCRIPT)) return null
   const command = todoCommand()
-  const items = savedItems(sessionId)
+  const { items, doneEarlier } = savedList(sessionId)
   const reminders = REMINDERS[languageOf()]
   if (items.length === 0) return reminders.ask(command)
-  const listing = items.map((item, i) => `${i + 1}${item.done ? '✓' : '☐'} ${item.text}`).join('; ')
-  return reminders.show(listing, command)
+  // Same numbering as todo.mjs's load(): the stored number, or the position for files written before numbers were stored
+  const entries = items.map((item, i) => `${Number.isInteger(item.id) ? item.id : i + 1}${item.done ? '✓' : '☐'} ${item.text}`)
+  if (doneEarlier > 0) entries.push(reminders.earlier(doneEarlier))
+  return reminders.show(entries.join('; '), command)
 }
 
 // Do not hang a prompt if stdin never closes (the hook is also runnable by hand)

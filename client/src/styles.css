@@ -235,6 +235,8 @@ h1, h2, h3, h4, h5, p { margin: 0; }
 .todo svg { flex: none; margin-top: 4px; color: var(--quiet); }
 .todo--done { color: var(--label-3); }
 .todo--done svg { color: var(--ok); }
+/* The tally of finished items todo.mjs no longer lists: quieter than the items themselves */
+.todo--earlier svg { color: var(--quiet); }
 .goal-raw { color: var(--label-3); display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
 
 .updates { display: flex; flex-direction: column; gap: 6px; min-width: 0; }

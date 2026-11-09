@@ -12,7 +12,7 @@ import { groupOf, listGroups, ungroupedAt } from './groups.ts'
 import { currentLang, serverT } from './lang.ts'
 import { jobsOf, pagesOf } from './jobs.ts'
 import { cachedPr, projectOf } from './repo.ts'
-import { readSessionTodos } from './sessionTodos.ts'
+import { readSessionTodos, type SessionTodos } from './sessionTodos.ts'
 import { describeAction, digestTranscript, readSubagents, type TranscriptDigest } from './transcript.ts'
 import { readUsage } from './usage.ts'
 
@@ -154,12 +154,12 @@ function looksLikeFile(path: string): boolean {
   }
 }
 
-type PlanFields = 'goal' | 'todos' | 'todoSource' | 'progress' | 'progressAt' | 'worktrees'
+type PlanFields = 'goal' | 'todos' | 'todoSource' | 'todosDoneEarlier' | 'progress' | 'progressAt' | 'worktrees'
 
 /** The strip's todos, latest progress and attached worktrees. A todo list the session wrote itself wins; Haiku's extraction is used only when there is none */
-function planOf(opening: string[], digest: TranscriptDigest | null, sessionId: string, manual: TodoItem[] | null): Pick<AgentStrip, PlanFields> {
+function planOf(opening: string[], digest: TranscriptDigest | null, sessionId: string, manual: SessionTodos | null): Pick<AgentStrip, PlanFields> {
   const brief = briefOf(sessionId)
-  const todos = manual ?? brief.todos
+  const todos = manual?.items ?? brief.todos
   const worktrees = Object.entries(digest?.worktrees ?? {})
     .filter(([path]) => !looksLikeFile(path))
     .sort(([, a], [, b]) => b - a)
@@ -169,6 +169,7 @@ function planOf(opening: string[], digest: TranscriptDigest | null, sessionId: s
     goal: opening.length === 0 ? null : clip(opening[0], TEXT_LIMIT),
     todos,
     todoSource: todos === null ? null : manual !== null ? 'session' : 'haiku',
+    todosDoneEarlier: manual === null ? 0 : manual.doneEarlier,
     progress: brief.progress,
     progressAt: brief.progressAt,
     worktrees,
@@ -196,7 +197,7 @@ function briefJobOf(strip: AgentStrip, opening: string[], manual: TodoItem[] | n
 interface Built {
   strip: AgentStrip
   opening: string[]
-  manual: TodoItem[] | null
+  manual: SessionTodos | null
 }
 
 async function buildStrip(listing: AgentListing, now: number): Promise<Built> {
@@ -271,7 +272,7 @@ function bareStrip(listing: AgentListing): AgentStrip {
     sessionId: listing.sessionId, shortId: listing.id, kind: listing.kind,
     surface: serverT(listing.kind === 'background' ? 'surface.background' : 'surface.interactive'), name: listing.name,
     project: listing.cwd, cwd: listing.cwd, branch: null, bay: bayOf(kind, null, 0, []), stateKind: kind,
-    now: serverT('now.unreadable'), lastPrompt: null, goal: null, todos: null, todoSource: null, progress: null, progressAt: null, worktrees: [], stateSince: null, updatedAt: null,
+    now: serverT('now.unreadable'), lastPrompt: null, goal: null, todos: null, todoSource: null, todosDoneEarlier: 0, progress: null, progressAt: null, worktrees: [], stateSince: null, updatedAt: null,
     startedAt: listing.startedAt === undefined ? null : Number(listing.startedAt),
     segments: [], events: [], subagents: [], jobs: [], pages: [], pr: null, groupId: groupOf(listing.sessionId), contextTokens: null,
   }
@@ -310,7 +311,7 @@ function assemble(allStrips: AgentStrip[], built: ReadonlyMap<string, Built>, re
   // Only strips on display get todos and progress written; retired ones cost nothing
   for (const strip of shown) {
     const source = built.get(strip.sessionId)
-    if (source !== undefined) requestBrief(briefJobOf(strip, source.opening, source.manual))
+    if (source !== undefined) requestBrief(briefJobOf(strip, source.opening, source.manual?.items ?? null))
   }
   const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: shown, retired: retiredRows, groups: listGroups(), ungroupedAt: ungroupedAt(), usage, error: null, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
   return { snapshot, allStrips, revived }

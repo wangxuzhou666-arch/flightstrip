@@ -49,7 +49,7 @@ npx flightstrip --demo    # 先用示例 session 看看效果
 npx flightstrip setup     # 可选：让每个 session 自己维护目标清单
 ```
 
-`setup` 会往 `~/.claude/settings.json` 加一个 `UserPromptSubmit` hook，加之前先备份并征求你同意。之后每一轮对话，hook 都会提醒 session 它的清单，session 做完一项自己勾掉。`npx flightstrip uninstall` 可以移除。
+`setup` 会往 `~/.claude/settings.json` 加一个 `UserPromptSubmit` hook，加之前先备份并征求你同意。之后每一轮对话，hook 都会提醒 session 它的清单，session 做完一项自己勾掉。已完成的只列最近 3 条，更早的只计个数，长 session 的清单不会越积越长。`setup` 会把脚本复制到 `~/.flightstrip/bin/`，所以升级 flightstrip 后要再运行一次。`npx flightstrip uninstall` 可以移除。
 
 想让看板在 macOS 后台常驻：
 

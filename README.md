@@ -49,7 +49,7 @@ npx flightstrip --demo    # look around with sample sessions first
 npx flightstrip setup     # optional: let each session keep its own goal checklist
 ```
 
-`setup` adds one `UserPromptSubmit` hook to `~/.claude/settings.json` (after backing it up and asking you). Each turn, the hook reminds the session of its checklist, and the session ticks items off itself. `npx flightstrip uninstall` removes it.
+`setup` adds one `UserPromptSubmit` hook to `~/.claude/settings.json` (after backing it up and asking you). Each turn, the hook reminds the session of its checklist, and the session ticks items off itself. Only the last 3 finished items stay listed (older ones are just counted), so a long session's list doesn't fill up. `setup` copies its scripts into `~/.flightstrip/bin/`, so run it again after upgrading flightstrip. `npx flightstrip uninstall` removes it.
 
 To keep the board running in the background on macOS:
 

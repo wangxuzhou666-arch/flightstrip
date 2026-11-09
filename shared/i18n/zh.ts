@@ -96,6 +96,7 @@ export const zh: Dictionary = {
   'goals.summarizing': '整理中',
   'goals.count': '{done}/{total} 已完成',
   'goals.sourceSession': '这个 session 自己写的待办',
+  'goals.earlier': '更早完成的 {n} 条已收起',
   'goals.sourceBrief': '从你开场的几句话里整理的',
   'goals.opening': '你开场说的：{goal}',
   'goals.empty': '没有记录',

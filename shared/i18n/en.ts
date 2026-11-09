@@ -107,6 +107,7 @@ export const en = {
   'goals.summarizing': 'Summarizing…',
   'goals.count': '{done}/{total} done',
   'goals.sourceSession': 'To-dos this session wrote itself',
+  'goals.earlier': { one: '{n} earlier item done', other: '{n} earlier items done' },
   'goals.sourceBrief': 'Extracted from your opening messages',
   'goals.opening': 'You opened with: {goal}',
   'goals.empty': 'Nothing recorded',

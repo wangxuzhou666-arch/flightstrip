@@ -58,26 +58,39 @@ export function StageMark({ stage }: { stage: Stage }) {
   )
 }
 
+function TodoBox({ done }: { done: boolean }) {
+  return (
+    <svg width="13" height="13" viewBox="0 0 12 12" aria-hidden="true">
+      {done ? (
+        <><rect x="0.5" y="0.5" width="11" height="11" rx="2.5" fill="currentColor" />
+          <path d="M3.3 6.2l1.8 1.8 3.6-4" fill="none" stroke="var(--bg)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></>
+      ) : (
+        <rect x="1.25" y="1.25" width="9.5" height="9.5" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      )}
+    </svg>
+  )
+}
+
 function Goals({ strip, briefsEnabled }: { strip: AgentStrip; briefsEnabled: boolean }) {
   const { t } = useI18n()
   const todos = strip.todos
+  // Finished items todo.mjs no longer lists still count, so the tally never drops when an old one falls off
+  const earlier = strip.todosDoneEarlier
   // todos === null only means "still being extracted" while briefs are on; with briefs off nothing is coming
-  const note = todos === null ? (briefsEnabled ? t('goals.summarizing') : null) : t('goals.count', { done: todos.filter((todo) => todo.done).length, total: todos.length })
+  const note = todos === null
+    ? (briefsEnabled ? t('goals.summarizing') : null)
+    : t('goals.count', { done: earlier + todos.filter((todo) => todo.done).length, total: earlier + todos.length })
   return (
     <section className="goals" aria-label={t('goals.title')}>
       <h4>{t('goals.title')}{note !== null && <small title={strip.todoSource === 'session' ? t('goals.sourceSession') : t('goals.sourceBrief')}>{note}</small>}</h4>
       {todos !== null ? (
         <ul className="todos">
+          {earlier > 0 && (
+            <li className="todo todo--done todo--earlier"><TodoBox done /><span>{t('goals.earlier', { n: earlier })}</span></li>
+          )}
           {todos.map((todo, i) => (
             <li key={`${i}-${todo.text}`} className={todo.done ? 'todo todo--done' : 'todo'}>
-              <svg width="13" height="13" viewBox="0 0 12 12" aria-hidden="true">
-                {todo.done ? (
-                  <><rect x="0.5" y="0.5" width="11" height="11" rx="2.5" fill="currentColor" />
-                    <path d="M3.3 6.2l1.8 1.8 3.6-4" fill="none" stroke="var(--bg)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></>
-                ) : (
-                  <rect x="1.25" y="1.25" width="9.5" height="9.5" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
-                )}
-              </svg>
+              <TodoBox done={todo.done} />
               <span>{todo.text}</span>
             </li>
           ))}

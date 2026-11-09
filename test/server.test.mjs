@@ -709,3 +709,21 @@ test('background jobs: an ending read off the output file is decided again when 
   assert.equal(status(later), 'stopped')
   server.run.child.kill()
 })
+
+test('todos: finished items todo.mjs no longer lists still count on the strip', async () => {
+  const sessionId = 'cafe0099-0000-4000-8000-00000000cafe'
+  const s = jobSession('TODO-SESSION', sessionId)
+  s.write([lastRead(new Date().toISOString())])
+  const todo = (...args) => execFileSync(process.execPath, [join(REPO, 'scripts', 'todo.mjs'), ...args], {
+    encoding: 'utf8', env: { PATH: process.env.PATH, HOME: s.box.home, CLAUDE_CODE_SESSION_ID: sessionId },
+  })
+  todo('set', 'A', 'B', 'C', 'D', 'E', 'F')
+  for (const n of ['1', '2', '3', '4', '5']) todo('done', n)
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: s.custom }, s.box)
+  const snapshot = await snapshotWhere(server.url, (snap) => s.strip(snap)?.todoSource === 'session')
+  const strip = s.strip(snapshot)
+  assert.deepEqual(strip.todos.map((t) => `${t.done ? 'x' : ' '} ${t.text}`), ['x C', 'x D', 'x E', '  F'])
+  assert.equal(strip.todosDoneEarlier, 2, 'A and B dropped off the list but still count as done')
+  server.run.child.kill()
+})

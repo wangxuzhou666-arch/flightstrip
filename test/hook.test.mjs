@@ -3,11 +3,12 @@
 //   N (must ask for a checklist): no todos yet, corrupt todo file; the contrast to S, proving "silent" isn't "blind"
 //   L (must inject the checklist): numbering from 1, ticks matching, and a hint to run `done N`
 //   P: the command is written with ~/ under HOME instead of an absolute path in the context
+//   K: todo.mjs keeps every unfinished item and only the last 3 finished, and an item's number never changes
 // Each test builds the layout `flightstrip setup` produces (<state dir>/bin/{todo.mjs,todo-reminder.mjs}) in a temp
 // HOME, so nothing reads the real ~/.flightstrip.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, test } from 'node:test'
@@ -143,6 +144,88 @@ test('R1 shows what todo.mjs wrote: set, then done 1', () => {
   assert.ok(run(setup, withSession(id)).includes('1✓ Write the parser; 2☐ Ship it'))
 })
 
+// ---- K: only the last 3 finished items stay listed; numbers never change or get reused ----
+
+/** Runs the installed todo.mjs as session `id` would */
+function todoCli(setup, id) {
+  return (...args) => spawnSync(process.execPath, [join(setup.state, 'bin', 'todo.mjs'), ...args], {
+    encoding: 'utf8', env: { PATH: process.env.PATH, HOME: setup.home, CLAUDE_CODE_SESSION_ID: id },
+  })
+}
+
+/** Ticks the items one call at a time, so each gets its own tick time */
+function tickInTurn(todo, ...numbers) {
+  for (const n of numbers) assert.equal(todo('done', String(n)).status, 0, `done ${n}`)
+}
+
+test('K1 a fourth finished item drops the oldest finished one; the rest keep their numbers', () => {
+  const setup = install()
+  const id = 'cccccccc-1111-4222-8333-444444444444'
+  const todo = todoCli(setup, id)
+  assert.equal(todo('set', 'A', 'B', 'C', 'D', 'E').status, 0)
+  tickInTurn(todo, 1, 2, 3)
+  assert.equal(todo('show').stdout.trim(), '[x] 1. A\n[x] 2. B\n[x] 3. C\n[ ] 4. D\n[ ] 5. E', 'three finished items all stay')
+  tickInTurn(todo, 4)
+  assert.equal(todo('show').stdout.trim(), '[x] 2. B\n[x] 3. C\n[x] 4. D\n[ ] 5. E\n(1 earlier finished item is no longer listed)')
+  assert.ok(run(setup, withSession(id)).includes('2✓ B; 3✓ C; 4✓ D; 5☐ E; (1 earlier finished item not listed)'))
+  // The number that dropped off is gone, it does not point at something else now
+  const gone = todo('done', '1')
+  assert.equal(gone.status, 1)
+  assert.match(gone.stderr, /There is no item 1; the list has 2, 3, 4, 5/)
+  // set starts a new list: numbers from 1, no earlier count
+  assert.equal(todo('set', 'Next').status, 0)
+  assert.equal(todo('show').stdout.trim(), '[ ] 1. Next')
+  assert.ok(run(setup, withSession(id)).includes('1☐ Next. '))
+})
+
+test('K2 the order things were ticked decides what stays, and a dropped number is never handed out again', () => {
+  const setup = install()
+  const todo = todoCli(setup, 'dddddddd-1111-4222-8333-444444444444')
+  assert.equal(todo('set', 'A', 'B', 'C', 'D', 'E').status, 0)
+  tickInTurn(todo, 5, 1, 2, 3)
+  assert.equal(todo('show').stdout.trim(), '[x] 1. A\n[x] 2. B\n[x] 3. C\n[ ] 4. D\n(1 earlier finished item is no longer listed)', 'item 5 was ticked first, so it goes')
+  assert.equal(todo('add', 'F').status, 0)
+  assert.match(todo('show').stdout, /\[ \] 4\. D\n\[ \] 6\. F\n/, 'F gets 6, not the 5 that just dropped off')
+})
+
+test('K3 ticking a finished item again keeps its original place in line', () => {
+  const setup = install()
+  const todo = todoCli(setup, 'eeeeeeee-1111-4222-8333-444444444444')
+  assert.equal(todo('set', 'A', 'B', 'C', 'D').status, 0)
+  tickInTurn(todo, 1, 2, 3, 1, 4)
+  assert.equal(todo('show').stdout.trim(), '[x] 2. B\n[x] 3. C\n[x] 4. D\n(1 earlier finished item is no longer listed)')
+})
+
+test('K4 the limit counts unfinished items only, so a long session can keep adding', () => {
+  const setup = install()
+  const id = 'ffffffff-1111-4222-8333-444444444444'
+  const todo = todoCli(setup, id)
+  const names = (from, count) => Array.from({ length: count }, (_, i) => `Item ${from + i}`)
+  assert.equal(todo('set', ...names(1, 12)).status, 0)
+  assert.equal(todo('done', '1', '2', '3', '4', '5').status, 0)
+  assert.equal(todo('add', ...names(13, 5)).status, 0, '7 open + 5 new = 12 open, fine even though 17 were written')
+  const file = join(setup.state, 'todos', `${id}.json`)
+  const before = readFileSync(file, 'utf8')
+  const over = todo('add', 'One too many')
+  assert.equal(over.status, 1)
+  assert.match(over.stderr, /At most 12 unfinished items, got 13/)
+  assert.equal(readFileSync(file, 'utf8'), before, 'a refused add leaves the list alone')
+})
+
+test('K5 a list written before numbers were stored keeps its positions as numbers, and is trimmed on the next write', () => {
+  const setup = install()
+  const id = '99999999-1111-4222-8333-444444444444'
+  const items = Array.from({ length: 12 }, (_, i) => ({ text: `Old ${i + 1}`, done: i < 11 }))
+  writeFileSync(join(setup.state, 'todos', `${id}.json`), JSON.stringify({ items, updatedAt: 1 }))
+  assert.ok(run(setup, withSession(id)).includes('11✓ Old 11; 12☐ Old 12. '), 'numbered by position until todo.mjs rewrites it')
+  const todo = todoCli(setup, id)
+  assert.equal(todo('done', '12').status, 0)
+  assert.equal(todo('show').stdout.trim(), '[x] 10. Old 10\n[x] 11. Old 11\n[x] 12. Old 12\n(9 earlier finished items are no longer listed)')
+  assert.equal(todo('add', 'New').status, 0)
+  assert.match(todo('show').stdout, /\[ \] 13\. New/)
+  assert.ok(run(setup, withSession(id)).includes('10✓ Old 10; 11✓ Old 11; 12✓ Old 12; 13☐ New; (9 earlier finished items not listed)'))
+})
+
 // ---- language: the hook, todo.mjs and statusline.mjs print in the dashboard's language ----
 //   saved choice (<state dir>/settings.json) first, then FLIGHTSTRIP_LANG, then the system locale, then English;
 //   anything unusable is skipped
@@ -190,13 +273,13 @@ test('Z3 todo.mjs words its messages in the same language', () => {
     encoding: 'utf8', env: { PATH: process.env.PATH, HOME: setup.home, CLAUDE_CODE_SESSION_ID: id },
   })
   assert.match(todo('show').stdout, /no hand-written to-dos/)
-  assert.match(todo('done', '9').stderr, /There is no item 9; the list has 0 items/)
+  assert.match(todo('done', '9').stderr, /There is no item 9; the list is empty/)
   assert.match(todo('help').stdout, /replace the whole list/)
   saveLang(setup, 'zh')
   assert.match(todo('show').stdout, /没有手动待办/)
   const bad = todo('done', '9')
   assert.equal(bad.status, 1)
-  assert.match(bad.stderr, /没有第 9 条，现在共 0 条/)
+  assert.match(bad.stderr, /没有第 9 条，清单是空的/)
   assert.match(todo('help').stdout, /整份替换/)
   assert.equal(todo('set', 'One').status, 0)
   assert.equal(todo('show').stdout.trim(), '[ ] 1. One', 'the list itself is not translated')
