@@ -6,7 +6,7 @@ import { createReadStream, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { MessageKey, Translate } from '../shared/i18n/index.ts'
-import type { JobStatus, SubagentRow } from '../shared/types.ts'
+import type { JobProgress, JobStatus, SubagentRow } from '../shared/types.ts'
 import { parseJsonLine } from './agents.ts'
 import { config } from './config.ts'
 
@@ -63,6 +63,8 @@ export interface RawJob {
   endedAt: number | null
   /** The ending was read off the output file's last line: an official notice that arrives later may correct it */
   endedFromOutput?: boolean
+  /** The newest progress mark seen in the output, kept for when later output pushes it out of the part that is read */
+  progress?: JobProgress
 }
 
 // .claude/worktrees/<name> (created by Claude Code) counts as a worktree. The name only accepts [A-Za-z0-9._-];

@@ -6,6 +6,7 @@ import type { AgentStrip, BackgroundJob, SessionGroup } from '../../shared/types
 import { postAction, postGroup } from './api.ts'
 import { type I18n, useI18n } from './i18n.tsx'
 import { FolderIcon, RetireIcon } from './icons.tsx'
+import { JobProgressRow, JobSignals, showsTail } from './JobSignals.tsx'
 import { Timeline } from './Timeline.tsx'
 
 const CHECK_KEYS = { pass: 'ci.pass', fail: 'ci.fail', pending: 'ci.pending' } as const satisfies Record<'pass' | 'fail' | 'pending', MessageKey>
@@ -118,7 +119,9 @@ function JobLine({ job, now }: { job: BackgroundJob; now: number }) {
           ? t('jobline.running', { time: fmt.clock(job.startedAt), span: fmt.span(job.startedAt, now) })
           : t('jobline.failed', { time: fmt.clock(job.endedAt ?? job.startedAt) })}
       </span>
-      {job.tail && <code className="job-tail" title={t('jobline.tail')}>{job.tail}</code>}
+      {job.progress !== null && <JobProgressRow progress={job.progress} />}
+      <JobSignals job={job} now={now} />
+      {showsTail(job) && <code className="job-tail" title={t('jobline.tail')}>{job.tail}</code>}
     </li>
   )
 }

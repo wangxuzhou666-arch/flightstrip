@@ -9,10 +9,13 @@ import { execFile } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
 import { open, realpath } from 'node:fs/promises'
 import { connect } from 'node:net'
-import type { BackgroundJob, JobStatus, PageRef } from '../shared/types.ts'
+import { progressIn } from '../shared/jobProgress.ts'
+import type { BackgroundJob, JobProgress, JobStatus, PageRef } from '../shared/types.ts'
 import type { RawJob } from './transcript.ts'
 
-const TAIL_BYTES = 4096
+// The end of the output that is read on each refresh: the last line, plus enough before it to find the newest
+// progress mark (a step header followed by a page of logs). Only running jobs are read, a few at a time
+const TAIL_BYTES = 64 * 1024
 const TAIL_LIMIT = 160
 const PAGE_LIMIT = 6
 const PROBE_TIMEOUT_MS = 300
@@ -57,8 +60,16 @@ function writtenFiles(paths: string[]): Promise<Set<string> | 'missing' | 'faile
   })
 }
 
-/** The last non-empty line of the output file and when the file last changed; null if it can't be read */
-async function tailOf(path: string): Promise<{ line: string | null; modifiedAt: number } | null> {
+interface OutputRead {
+  line: string | null
+  progress: JobProgress | null
+  modifiedAt: number
+  size: number
+}
+
+/** The last non-empty line of the output file, the newest progress mark near its end, and when the file last changed;
+ *  null if it can't be read */
+async function tailOf(path: string): Promise<OutputRead | null> {
   let handle
   try {
     handle = await open(path, 'r')
@@ -70,8 +81,9 @@ async function tailOf(path: string): Promise<{ line: string | null; modifiedAt: 
     const length = Math.min(size, TAIL_BYTES)
     const buffer = Buffer.alloc(length)
     await handle.read(buffer, 0, length, size - length)
+    // A \r rewrites the line in place (progress bars do this), so only what comes after the last one is on screen
     const lines = buffer.toString('utf8').replace(ANSI, '').split(/\r?\n|\r/).map((line) => line.trim()).filter(Boolean)
-    return { line: lines.at(-1) ?? null, modifiedAt: mtimeMs }
+    return { line: lines.at(-1) ?? null, progress: progressIn(lines), modifiedAt: mtimeMs, size }
   } finally {
     await handle.close()
   }
@@ -95,7 +107,7 @@ export async function jobsOf(raw: Record<string, RawJob>, nameOf: (description: 
       job.endedFromOutput = false
     }
     if (job.status !== null) {
-      shown.push({ job, tail: null })
+      shown.push(ended(job))
       continue
     }
     if (job.outputPath === null || !existsSync(job.outputPath)) {
@@ -107,11 +119,11 @@ export async function jobsOf(raw: Record<string, RawJob>, nameOf: (description: 
     const read = await tailOf(job.outputPath)
     if (read === null) continue
     if (read.line !== null && EXIT_LINE.test(read.line)) toConfirm.push(job)
-    else shown.push({ job, tail: clip(read.line) })
+    else shown.push(running(job, read))
   }
   if (toConfirm.length > 0) shown.push(...(await confirmEnded(toConfirm)))
   return shown
-    .map(({ job, tail }) => ({
+    .map(({ job, tail, progress, lastOutputAt }) => ({
       id: job.id,
       name: nameOf(job.description),
       description: job.description,
@@ -120,6 +132,10 @@ export async function jobsOf(raw: Record<string, RawJob>, nameOf: (description: 
       startedAt: job.startedAt,
       endedAt: job.endedAt,
       tail,
+      progress,
+      lastOutputAt,
+      // Filled in by collect.ts from one sample across all sessions
+      usage: null,
     }))
     .sort((a, b) => b.startedAt - a.startedAt)
 }
@@ -137,6 +153,19 @@ function changedSince(path: string | null, at: number): boolean {
 interface Shown {
   job: RawJob
   tail: string | null
+  progress: JobProgress | null
+  lastOutputAt: number | null
+}
+
+const ended = (job: RawJob): Shown => ({ job, tail: null, progress: null, lastOutputAt: null })
+
+/** A running job as the strip shows it. A mark that later output pushed out of the part read stays on the record, so
+ *  the bar doesn't vanish halfway through a long step. An empty output file says nothing about when the job last did
+ *  something (it may write to its own log), so it gets no output time */
+function running(job: RawJob, read: OutputRead): Shown {
+  if (read.progress !== null) job.progress = read.progress
+  const progress = read.progress ?? (job.progress === undefined ? null : { ...job.progress, lineIsTail: false })
+  return { job, tail: clip(read.line), progress, lastOutputAt: read.size > 0 ? read.modifiedAt : null }
 }
 
 /** Jobs whose output ends with an exit line. No process writing it: the line ends the job, and that is written back to
@@ -168,18 +197,18 @@ async function confirmEnded(jobs: RawJob[]): Promise<Shown[]> {
     if (read === null) continue
     const exit = read.line?.match(EXIT_LINE)
     if (!exit || held(real[i])) {
-      shown.push({ job, tail: clip(read.line) })
+      shown.push(running(job, read))
       continue
     }
     const status: JobStatus = exit[1] === undefined ? 'stopped' : exit[1] === '0' ? 'completed' : 'failed'
     if (written === 'failed') {
-      shown.push({ job, tail: clip(read.line) })
+      shown.push(running(job, read))
       continue
     }
     job.status = status
     job.endedAt = read.modifiedAt
     job.endedFromOutput = true
-    shown.push({ job, tail: null })
+    shown.push(ended(job))
   }
   return shown
 }

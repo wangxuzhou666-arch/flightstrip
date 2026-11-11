@@ -470,6 +470,67 @@ test('background jobs: both ways of starting one are tracked, every ending signa
   server.run.child.kill()
 })
 
+test('background jobs: a running one shows its progress, when it last printed and what its processes use; the snapshot carries the machine load', async () => {
+  const box = sandbox()
+  const custom = join(box.root, 'claude-config')
+  const tasks = join(box.root, 'tasks')
+  const sessionId = 'cafe0005-0000-4000-8000-00000000cafe'
+  mkdirSync(join(custom, 'sessions'), { recursive: true })
+  mkdirSync(join(custom, 'projects', 'lane'), { recursive: true })
+  mkdirSync(tasks)
+  writeFileSync(join(custom, 'sessions', `${process.pid}.json`), JSON.stringify({ sessionId, pid: process.pid, name: 'PROGRESS-SESSION', cwd: box.home, startedAt: Date.now(), status: 'busy', entrypoint: 'cli' }))
+  const output = (id) => join(tasks, `${id}.output`)
+  // A step header followed by its log: the bar comes from the header, and the last line is still shown under it
+  writeFileSync(output('stepping'), '==> [3/8] Sync code\ncopying 12 files\n')
+  const quietSince = Date.now() - 10 * 60_000
+  utimesSync(output('stepping'), quietSince / 1000, quietSince / 1000)
+  // Nothing printed yet: no time to judge a stall by
+  writeFileSync(output('silent'), '')
+  // A real process with the output file as its stdout, as Claude Code starts one; its child counts too
+  writeFileSync(output('held'), 'serving\n')
+  const fd = openSync(output('held'), 'a')
+  const holder = spawn('/bin/sh', ['-c', 'sleep 60 & wait'], { stdio: ['ignore', fd, fd] })
+  closeSync(fd)
+  children.push(holder)
+  const at = new Date().toISOString()
+  const rows = ['stepping', 'silent', 'held'].flatMap((id) => [
+    { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: `tu-${id}`, name: 'Bash', input: { command: `run ${id}`, description: `Job ${id}`, run_in_background: true } }], usage: { input_tokens: 10 } } },
+    { type: 'user', timestamp: at, toolUseResult: { stdout: '', backgroundTaskId: id }, message: { content: [{ type: 'tool_result', tool_use_id: `tu-${id}`, content: `Command running in background with ID: ${id}. Output is being written to: ${output(id)}. You will be notified when it completes` }] } },
+  ])
+  writeFileSync(join(custom, 'projects', 'lane', `${sessionId}.jsonl`), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+
+  const server = await startReal({ CLAUDE_CONFIG_DIR: custom }, box)
+  const strip = (snapshot) => snapshot.strips.find((s) => s.name === 'PROGRESS-SESSION')
+  const held = (snapshot) => strip(snapshot)?.jobs.find((job) => job.id === 'held')
+  const snapshot = await snapshotWhere(server.url, (s) => held(s)?.usage != null)
+  const shown = Object.fromEntries(strip(snapshot).jobs.map((job) => [job.id, job]))
+
+  assert.deepEqual(shown.stepping.progress, { fraction: 3 / 8, mark: '3/8', label: 'Sync code', lineIsTail: false })
+  assert.equal(shown.stepping.tail, 'copying 12 files')
+  assert.equal(Math.round(shown.stepping.lastOutputAt / 1000), Math.round(quietSince / 1000), 'the output file\'s change time is when it last printed')
+  assert.equal(shown.stepping.usage, null, 'no process writes its output file, so there is nothing to measure')
+  assert.equal(shown.silent.lastOutputAt, null)
+  assert.equal(shown.silent.progress, null)
+  const usage = shown.held.usage
+  assert.ok(usage.processes >= 2, `the shell and its child are both counted (got ${usage.processes})`)
+  assert.ok(usage.memoryBytes > 0 && usage.cpuPercent >= 0)
+
+  const { machine } = snapshot
+  assert.ok(machine.cores > 0)
+  assert.ok(machine.memory.totalBytes > 0 && machine.memory.usedBytes > 0 && machine.memory.usedBytes <= machine.memory.totalBytes)
+  assert.ok(machine.disk.freeBytes > 0 && machine.disk.freeBytes <= machine.disk.totalBytes)
+  assert.ok(machine.cpuPercent === null || (machine.cpuPercent >= 0 && machine.cpuPercent <= 100))
+
+  // A long step pushes its header out of the part of the output that is read: the bar it set stays
+  appendFileSync(output('stepping'), `${'log line\n'.repeat(10_000)}still syncing\n`)
+  const later = await snapshotWhere(server.url, (s) => strip(s)?.jobs.find((job) => job.id === 'stepping')?.tail === 'still syncing')
+  const stepping = strip(later).jobs.find((job) => job.id === 'stepping')
+  assert.equal(stepping.tail, 'still syncing')
+  assert.deepEqual(stepping.progress, { fraction: 3 / 8, mark: '3/8', label: 'Sync code', lineIsTail: false })
+  holder.kill()
+  server.run.child.kill()
+})
+
 test('background jobs: one started before the tail of a long transcript, which is all a first read parses, still shows', async () => {
   const box = sandbox()
   const custom = join(box.root, 'claude-config')

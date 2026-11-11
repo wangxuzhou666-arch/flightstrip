@@ -67,3 +67,18 @@ export function makeFormat(lang: Lang, t: Translate): Format {
     }),
   }
 }
+
+const UNITS = ['B', 'KB', 'MB', 'GB', 'TB']
+
+/** "2.1 GB", "512 MB": one decimal below 10, whole numbers above. Memory counts in 1024s (16 GB of RAM is 16 GiB, as
+ *  Activity Monitor shows it), disks in 1000s (as Finder and df -H do) */
+export function formatBytes(bytes: number, base: 1000 | 1024): string {
+  let value = Math.max(0, bytes)
+  let unit = 0
+  while (value >= base && unit < UNITS.length - 1) {
+    value /= base
+    unit++
+  }
+  const shown = value < 10 && unit > 0 ? value.toFixed(1).replace(/\.0$/, '') : String(Math.round(value))
+  return `${shown} ${UNITS[unit]}`
+}

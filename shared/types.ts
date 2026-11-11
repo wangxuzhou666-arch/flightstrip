@@ -59,6 +59,32 @@ export interface BackgroundJob {
   endedAt: number | null
   /** Last line of the output; only read for jobs that are still running */
   tail: string | null
+  /** How far it has got, read from the progress marks in its output; only for jobs that are still running */
+  progress: JobProgress | null
+  /** When the output last grew; null for a job that has printed nothing yet (it may write to its own log instead),
+   *  and for jobs that ended */
+  lastOutputAt: number | null
+  /** What the job's processes use right now; only for running jobs, null when they can't be found (no lsof or ps) */
+  usage: JobUsage | null
+}
+
+export interface JobUsage {
+  /** Summed over the job's processes, as top and Activity Monitor count it: 100 = one core flat out */
+  cpuPercent: number
+  /** Resident memory of those processes, bytes */
+  memoryBytes: number
+  processes: number
+}
+
+export interface JobProgress {
+  /** 0–1 */
+  fraction: number
+  /** The mark as the reader should see it: "3/8", "45%", "epoch 4/20" */
+  mark: string
+  /** The rest of that line, usually the step name; null when the line is only the mark */
+  label: string | null
+  /** The mark is on the last line of the output, so that line needn't be shown again */
+  lineIsTail: boolean
 }
 
 /** A local page the session opened */
@@ -135,6 +161,20 @@ export interface RetiredRow {
   retiredAt: number
 }
 
+/** The system's own judgment of how tight memory is (macOS only); null where there is none */
+export type MemoryPressure = 'normal' | 'warn' | 'critical'
+
+/** Load of the machine the dashboard runs on */
+export interface MachineReading {
+  at: number
+  /** Busy share of all cores together over the last few seconds, 0–100; null before there are two samples */
+  cpuPercent: number | null
+  cores: number
+  memory: { usedBytes: number; totalBytes: number; pressure: MemoryPressure | null }
+  /** The volume holding the home directory; null when it can't be read */
+  disk: { freeBytes: number; totalBytes: number } | null
+}
+
 export interface UsageWindow {
   percent: number | null
   resetsAt: number | null
@@ -166,6 +206,7 @@ export interface Snapshot {
   /** Position of "ungrouped" among the groups (0 = top); it can be dragged too */
   ungroupedAt: number
   usage: UsageReading | null
+  machine: MachineReading | null
   error: string | null
   /** False when FLIGHTSTRIP_BRIEFS=off: todos then come only from the session and progress stays empty,
    *  so the UI must not show a "still extracting" state */

@@ -13,9 +13,14 @@
 // jobs and "waiting for 8 min" counters tick up while you watch, and a demo left open all day still looks fresh instead
 // of drifting out of the 3-hour window.
 import type { Translate } from './i18n/index.ts'
-import type { AgentStrip, SessionGroup, UsageReading } from './types.ts'
+import { progressIn } from './jobProgress.ts'
+import type { AgentStrip, MachineReading, SessionGroup, UsageReading } from './types.ts'
 
 const MINUTE = 60_000
+const MB = 1024 ** 2
+const GiB = 1024 ** 3
+// Disks are sold and shown (Finder, df -H) in decimal units
+const GB = 1000 ** 3
 const LOOP_MS = 12 * MINUTE
 const STARTED_AT = Date.now()
 
@@ -88,6 +93,17 @@ export function demoUsage(now: number): UsageReading {
   }
 }
 
+/** A machine under moderate load: the CPU line moves a little on every refresh */
+export function demoMachine(now: number): MachineReading {
+  return {
+    at: now,
+    cpuPercent: 34 + 6 * Math.sin(now / 11_000),
+    cores: 10,
+    memory: { usedBytes: 11.4 * GiB, totalBytes: 16 * GiB, pressure: 'normal' },
+    disk: { freeBytes: 182 * GB, totalBytes: 494 * GB },
+  }
+}
+
 function worktree(name: string, lastAt: number): AgentStrip['worktrees'][number] {
   return { path: `${CWD}/.claude/worktrees/${name}`, name, lastAt, exists: true }
 }
@@ -117,7 +133,7 @@ function applyWrites(strip: DemoStrip, t: Translate): DemoStrip {
     stateSince: null,
     updatedAt: stopped,
     segments: strip.segments.map((segment) => ({ ...segment, to: Math.min(segment.to, stopped) })),
-    jobs: strip.jobs.map((job) => (job.status === 'running' ? { ...job, status: 'stopped', endedAt: stopped, tail: null } : job)),
+    jobs: strip.jobs.map((job) => (job.status === 'running' ? { ...job, status: 'stopped', endedAt: stopped, tail: null, progress: null, lastOutputAt: null, usage: null } : job)),
   }
 }
 
@@ -195,11 +211,14 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
           id: 'bj-1a2b', name: 'Run checkout spec 50 times', description: 'Run the checkout e2e spec 50 times to check the flake is gone',
           command: 'npx playwright test checkout.spec.ts --repeat-each=50 --reporter=line', status: 'running',
           startedAt: e2eStartedAt, endedAt: null, tail: `[${specRun}/50] checkout.spec.ts › pays with a saved card`,
+          progress: progressIn([`[${specRun}/50] checkout.spec.ts › pays with a saved card`]), lastOutputAt: now - 4_000,
+          // Playwright workers keep a few cores busy; the figure drifts so the line looks alive
+          usage: { cpuPercent: 230 + 40 * Math.sin(now / 9_000), memoryBytes: 1.6 * GiB, processes: 9 },
         },
         {
           id: 'bj-0f9e', name: 'Capture a trace of the failing run', description: 'Run the checkout spec with tracing on until it fails once',
           command: 'npx playwright test checkout.spec.ts --trace on --repeat-each=20', status: 'completed',
-          startedAt: ago(30), endedAt: ago(22), tail: null,
+          startedAt: ago(30), endedAt: ago(22), tail: null, progress: null, lastOutputAt: null, usage: null,
         },
       ],
       pages: [{ url: 'http://localhost:3910/checkout', label: 'localhost:3910/checkout', lastAt: ago(16), live: true }],
@@ -243,7 +262,14 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
       jobs: [
         {
           id: 'bj-5d21', name: 'Build all service images', description: 'Build the Docker images for every service on the new base image',
-          command: 'docker compose build --parallel', status: 'completed', startedAt: ago(38), endedAt: ago(31), tail: null,
+          command: 'docker compose build --parallel', status: 'completed', startedAt: ago(38), endedAt: ago(31), tail: null, progress: null, lastOutputAt: null, usage: null,
+        },
+        {
+          // Stuck: nothing printed for minutes and next to no CPU, the case the stall warning is for
+          id: 'bj-7c40', name: 'Run the inventory integration tests', description: 'Run the inventory service integration tests on Node 22',
+          command: 'npm run test:integration -w services/inventory', status: 'running', startedAt: ago(14), endedAt: null,
+          tail: 'Waiting for Postgres on localhost:5432 …', progress: null, lastOutputAt: ago(9),
+          usage: { cpuPercent: 0.3, memoryBytes: 210 * MB, processes: 3 },
         },
       ],
       pages: [], pr: null, contextTokens: 320_000,
@@ -280,7 +306,7 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
       jobs: [
         {
           id: 'bj-77c1', name: 'Load test order creation', description: 'Run the order-creation load test at 200 virtual users for 10 minutes',
-          command: 'k6 run load/order-create.js --vus 200 --duration 10m', status: 'failed', startedAt: ago(52), endedAt: ago(41), tail: null,
+          command: 'k6 run load/order-create.js --vus 200 --duration 10m', status: 'failed', startedAt: ago(52), endedAt: ago(41), tail: null, progress: null, lastOutputAt: null, usage: null,
         },
       ],
       pages: [], pr: pullRequest(473, 'OPEN', 'REVIEW_REQUIRED', 'fail'), contextTokens: 430_000,

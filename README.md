@@ -36,10 +36,12 @@ Air traffic controllers handled this decades ago: one paper strip per flight, ju
 - **Progress.** One plain-language line on where it is now, instead of a log to scroll.
 - **Needs you.** Sessions waiting on your answer, or with a failed job nobody picked up, rise to the top.
 - **Context.** Current context size against a line you choose (400K by default). Amber at 75%, red past it.
-- **Background jobs.** Commands a session started in the background: running, failed or finished, with the last line of output.
+- **Background jobs.** Commands a session started in the background: running, failed or finished, with the last line of output. A running one shows a progress bar when its output prints steps like `[3/8]`, `45%` or `epoch 4/20`, what its processes use in CPU and memory, and a note once it has printed nothing for 5 minutes, amber when its CPU has gone quiet too.
 - **Worktrees and PRs.** Which git worktrees the session touched, and its pull request's CI status.
 
 Group strips by project, name the groups yourself and drag them into the order you think in.
+
+The header shows this machine's CPU, memory and free disk next to your subscription usage.
 
 ## Quick start
 

@@ -9,6 +9,8 @@ import type { BackgroundJob, Snapshot } from '../../shared/types.ts'
 import { postLang } from './api.ts'
 import { GroupedOverview } from './Groups.tsx'
 import { I18nProvider, useI18n } from './i18n.tsx'
+import { JobProgressRow, JobSignals, showsTail } from './JobSignals.tsx'
+import { Machine } from './Machine.tsx'
 import { StageMark } from './SessionCard.tsx'
 import { Usage } from './Usage.tsx'
 import { type Connection, useSnapshot } from './useSnapshot.ts'
@@ -70,7 +72,9 @@ function Jobs({ snapshot }: { snapshot: Snapshot }) {
                 <span className="row-body">
                   <span className="row-title" title={job.description}>{job.name}</span>
                   <span className="row-meta">{meta}</span>
-                  {job.tail && <code className="job-tail">{job.tail}</code>}
+                  {job.progress !== null && <JobProgressRow progress={job.progress} />}
+                  <JobSignals job={job} now={now} />
+                  {showsTail(job) && <code className="job-tail" title={t('jobline.tail')}>{job.tail}</code>}
                   <details className="row-more">
                     <summary>{t('jobs.command')}</summary>
                     <code className="mono">{job.command}</code>
@@ -148,7 +152,12 @@ function Page({ snapshot, connection }: { snapshot: Snapshot | null; connection:
           </h1>
           <p className={connection === 'lost' ? 'status status--lost' : 'status'} role="status">{status}</p>
         </div>
-        {snapshot !== null && <Usage usage={snapshot.usage} now={snapshot.takenAt} />}
+        {snapshot !== null && (
+          <div className="head-meters">
+            {snapshot.machine !== null && <Machine machine={snapshot.machine} />}
+            <Usage usage={snapshot.usage} now={snapshot.takenAt} />
+          </div>
+        )}
       </header>
 
       <nav className="tabs" aria-label={t('tabs.label')}>

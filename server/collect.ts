@@ -3,8 +3,8 @@ import { existsSync, statSync } from 'node:fs'
 import { basename } from 'node:path'
 import { arrange, BAY_ORDER, demoBoardStrips, needsLine, surfaceOf } from '../shared/board.ts'
 import { WINDOW_MS } from '../shared/defaults.ts'
-import { demoUsage } from '../shared/demo.ts'
-import type { AgentStrip, BackgroundJob, Bay, Segment, Snapshot, StateKind, TimelineEvent, TodoItem, UsageReading } from '../shared/types.ts'
+import { demoMachine, demoUsage } from '../shared/demo.ts'
+import type { AgentStrip, BackgroundJob, Bay, MachineReading, Segment, Snapshot, StateKind, TimelineEvent, TodoItem, UsageReading } from '../shared/types.ts'
 import { type AgentListing, type JobTimelineEntry, listAgents, readInteractiveSession, readJobState, readJobTimeline } from './agents.ts'
 import { type BriefJob, briefOf, jobNameOf, type RecentLine, requestBrief } from './brief.ts'
 import { config } from './config.ts'
@@ -12,6 +12,7 @@ import { groupOf, listGroups, ungroupedAt } from './groups.ts'
 import { currentLang, serverT } from './lang.ts'
 import { jobsOf, pagesOf } from './jobs.ts'
 import { cachedPr, projectOf } from './repo.ts'
+import { sampleResources } from './resources.ts'
 import { readSessionTodos, type SessionTodos } from './sessionTodos.ts'
 import { describeAction, digestTranscript, readSubagents, type TranscriptDigest } from './transcript.ts'
 import { readUsage } from './usage.ts'
@@ -198,6 +199,8 @@ interface Built {
   strip: AgentStrip
   opening: string[]
   manual: SessionTodos | null
+  /** id → output file of the jobs still running, for finding their processes */
+  outputs: Map<string, string>
 }
 
 async function buildStrip(listing: AgentListing, now: number): Promise<Built> {
@@ -263,7 +266,11 @@ async function buildStrip(listing: AgentListing, now: number): Promise<Built> {
     groupId: groupOf(listing.sessionId),
     contextTokens: digest?.contextTokens ?? null,
   }
-  return { strip, opening, manual }
+  const outputs = new Map(jobs.flatMap((shown) => {
+    const path = shown.status === 'running' ? digest?.jobs[shown.id]?.outputPath : null
+    return path ? [[shown.id, path] as const] : []
+  }))
+  return { strip, opening, manual, outputs }
 }
 
 function bareStrip(listing: AgentListing): AgentStrip {
@@ -306,14 +313,15 @@ const OWN_PORT = config.port
 const OWN_CWD = config.stateDir
 
 /** Hides retired strips, requests briefs for the ones on display and wraps everything into a Snapshot */
-function assemble(allStrips: AgentStrip[], built: ReadonlyMap<string, Built>, retired: ReadonlyMap<string, number>, now: number, usage: UsageReading | null): Collected {
+function assemble(allStrips: AgentStrip[], built: ReadonlyMap<string, Built>, retired: ReadonlyMap<string, number>, now: number,
+  usage: UsageReading | null, machine: MachineReading | null): Collected {
   const { shown, retiredRows, revived } = arrange(allStrips, retired)
   // Only strips on display get todos and progress written; retired ones cost nothing
   for (const strip of shown) {
     const source = built.get(strip.sessionId)
     if (source !== undefined) requestBrief(briefJobOf(strip, source.opening, source.manual?.items ?? null))
   }
-  const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: shown, retired: retiredRows, groups: listGroups(), ungroupedAt: ungroupedAt(), usage, error: null, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
+  const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: shown, retired: retiredRows, groups: listGroups(), ungroupedAt: ungroupedAt(), usage, machine, error: null, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
   return { snapshot, allStrips, revived }
 }
 
@@ -322,7 +330,7 @@ function collectDemo(retired: ReadonlyMap<string, number>): Collected {
   const now = Date.now()
   const strips = demoBoardStrips(now, serverT, groupOf)
   // Briefs are not requested: nothing is built from files, so there is nothing for Haiku to read
-  return assemble(strips, new Map(), retired, now, demoUsage(now))
+  return assemble(strips, new Map(), retired, now, demoUsage(now), demoMachine(now))
 }
 
 export async function collectSnapshot(retired: ReadonlyMap<string, number>): Promise<Collected> {
@@ -335,7 +343,7 @@ export async function collectSnapshot(retired: ReadonlyMap<string, number>): Pro
   } catch (err) {
     // Boundary downgrade: claude not on PATH / the CLI changed its output format. The UI shows the reason; retried next round
     const error = describeCliFailure(err as Error & { stderr?: string })
-    const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: [], retired: [], groups: listGroups(), ungroupedAt: ungroupedAt(), usage, error, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
+    const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: [], retired: [], groups: listGroups(), ungroupedAt: ungroupedAt(), usage, machine: (await sampleResources([])).machine, error, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
     return { snapshot, allStrips: [], revived: [] }
   }
   const settled = await Promise.allSettled(listings.map((l) => buildStrip(l, now)))
@@ -349,5 +357,12 @@ export async function collectSnapshot(retired: ReadonlyMap<string, number>): Pro
     console.warn(`[collect] ${listings[i].name}: ${(outcome.reason as Error).message}`)
     return bareStrip(listings[i])
   })
-  return assemble(allStrips, built, retired, now, usage)
+  const resources = await sampleResources([...built.values()].flatMap((entry) => [...entry.outputs.values()]))
+  for (const entry of built.values()) {
+    for (const job of entry.strip.jobs) {
+      const path = entry.outputs.get(job.id)
+      if (path !== undefined) job.usage = resources.jobs.get(path) ?? null
+    }
+  }
+  return assemble(allStrips, built, retired, now, usage, resources.machine)
 }
