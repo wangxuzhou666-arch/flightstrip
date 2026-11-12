@@ -1,5 +1,6 @@
 // The memory ranking: how processes fold into rows, and what each row may be asked to do.
-//   H (ranking): top's memory column, application and script names, a session's big tasks split off with their owner,
+//   H (ranking): top's memory column, application and script names (inline code named after its parent), a session's big
+//     tasks split off with their owner,
 //     paused tasks kept, the dashboard's own line and the system left without an end button, the CPU leaders added.
 //   W (swap): the swap figure from sysctl on macOS and /proc/meminfo on Linux.
 //   D (demo): pause, resume and end change only the in-memory demo ranking, under the same rules as the real one.
@@ -38,6 +39,9 @@ test('H2 a process is named after its app, and an interpreter after the script i
   assert.equal(displayNameOf('/opt/homebrew/bin/python3.12', 'python3.12 -u scripts/train.py --epochs 20'), 'train.py')
   assert.equal(displayNameOf('/usr/local/bin/node', 'node'), 'node', 'no script: the interpreter name stays')
   assert.equal(displayNameOf(VSCODE, 'Electron --type=renderer'), 'Visual Studio Code')
+  assert.equal(displayNameOf('/opt/homebrew/bin/python3.12', 'python3.12 -u -c import sys;exec(eval(sys.stdin.readline()))'), 'python3.12',
+    'inline code is not a script: its first word is no name')
+  assert.equal(displayNameOf('/usr/local/bin/node', 'node -e console.log(1)'), 'node')
 })
 
 test('H3 a session folds with its small helpers; a big task splits off under its owner; a paused one always does', () => {
@@ -86,6 +90,26 @@ test('H4 the shown rows: the biggest by memory, then the CPU leaders a memory ra
   const keys = listed(groups).map((hog) => hog.key)
   assert.deepEqual(keys, ['big0', 'big1', 'big2', 'big3', 'big4', 'big5', 'big6', 'big7', 'indexer', 'held'])
   assert.equal('pids' in listed(groups)[0], false, 'pids stay on the server')
+})
+
+test('H5 a task whose heaviest process runs inline code is named after the nearest ancestor that says what it is', () => {
+  const PY = '/opt/homebrew/bin/python3.12'
+  const XDIST = 'python3.12 -u -c import sys;exec(eval(sys.stdin.readline()))'
+  const procs = table([
+    { pid: 200, exe: '/Users/me/.local/bin/claude', memoryBytes: 300 * MB },
+    // a test gate: shell → pytest → six xdist workers, each heavier than pytest itself
+    { pid: 300, ppid: 200, exe: '/bin/zsh', memoryBytes: 4 * MB },
+    { pid: 310, ppid: 300, exe: PY, args: 'python3.12 .venv/bin/pytest tests -n 6', memoryBytes: 300 * MB },
+    ...Array.from({ length: 6 }, (_, i) => ({ pid: 320 + i, ppid: 310, exe: PY, args: XDIST, memoryBytes: (500 + i) * MB })),
+    // inline code with nothing named above it but the shell: the interpreter name, never the code's first word
+    { pid: 400, ppid: 200, exe: '/bin/zsh', memoryBytes: 4 * MB },
+    { pid: 410, ppid: 400, exe: PY, args: 'python3.12 -c import json,sys; print(1)', memoryBytes: 400 * MB },
+  ])
+  const { groups } = rank(procs, [{ sessionId: 's1', name: 'Run the gate', pid: 200 }], 999)
+  const byKey = Object.fromEntries(groups.map((group) => [group.key, group]))
+  assert.equal(byKey['job:300'].name, 'pytest')
+  assert.equal(byKey['job:300'].processes, 8)
+  assert.equal(byKey['job:400'].name, 'python3.12')
 })
 
 test('W1 swap in use, from sysctl vm.swapusage and from /proc/meminfo', () => {

@@ -30,6 +30,8 @@ const CPU_LEADERS = 4
 const UNIT_BYTES: Record<string, number> = { B: 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4 }
 // The process name of these interpreters says nothing about what runs; the script name does
 const INTERPRETER = /^(python[\d.]*|node|ruby|perl|deno|bun|java|tsx)$/i
+// What follows these options is a piece of code, not a script (python -c, node -e, ruby / perl -e): no script name to take
+const INLINE_CODE = new Set(['-c', '-e', '--eval'])
 // The shell wrapped around a command: neither its name nor its arguments say what runs inside
 const SHELL = /^(bash|zsh|sh|dash|fish)$/
 // The operating system's own processes: ending them either restarts them or takes the desktop down, so no button.
@@ -117,13 +119,33 @@ export function appNameOf(exe: string): string {
   return app !== null ? app[1] : basename(exe)
 }
 
-/** A name a person recognizes: an interpreter is replaced by the script it runs (python scripts/train.py → train.py) */
+/**
+ * A name a person recognizes: an interpreter is replaced by the script it runs (python scripts/train.py → train.py).
+ * An interpreter running inline code has no script, so it keeps its own name.
+ */
 export function displayNameOf(exe: string, args: string): string {
   const name = appNameOf(exe)
   if (!INTERPRETER.test(name)) return name
-  // args starts with the executable; the first word after it that isn't an option is the script
-  const script = args.split(/\s+/).slice(1).find((word) => !word.startsWith('-'))
-  return script === undefined ? name : basename(script)
+  // args starts with the executable; the first word after it that isn't an option is the script. Meeting -c / -e first
+  // means what follows is code: pytest-xdist workers run python -c "import sys;exec(...)" and used to show up as "import"
+  for (const word of args.split(/\s+/).slice(1)) {
+    if (INLINE_CODE.has(word)) return name
+    if (!word.startsWith('-')) return basename(word)
+  }
+  return name
+}
+
+/**
+ * A session task's row name. When the heaviest process's own name says nothing (a shell, or an interpreter running
+ * inline code), take the nearest ancestor inside the same tree whose name does: a pytest-xdist worker's parent is pytest.
+ */
+export function jobNameOf(heaviest: Proc, table: Map<number, Proc>, tree: Set<number>): string {
+  for (let proc: Proc | undefined = heaviest; proc !== undefined && tree.has(proc.pid); proc = table.get(proc.ppid)) {
+    const app = appNameOf(proc.exe)
+    const name = displayNameOf(proc.exe, proc.args)
+    if (!SHELL.test(app) && !(INTERPRETER.test(app) && name === app)) return name
+  }
+  return displayNameOf(heaviest.exe, heaviest.args)
 }
 
 function childrenOf(table: Map<number, Proc>): Map<number, number[]> {
@@ -187,7 +209,7 @@ export function rank(table: Map<number, Proc>, sessions: SessionProc[], ownPid: 
       const weight = (proc: Proc) => proc.memoryBytes / SPLIT_BYTES + proc.cpuPercent / SPLIT_CPU
       const heaviest = (workers.length > 0 ? workers : procs).reduce((a, b) => (weight(b) > weight(a) ? b : a))
       groups.push({
-        key: `job:${child}`, name: displayNameOf(heaviest.exe, heaviest.args), kind: 'job', ...sum,
+        key: `job:${child}`, name: jobNameOf(heaviest, table, new Set(pids)), kind: 'job', ...sum,
         processes: pids.length, owner: session.name, killable: true, pausable: true, paused: stopped, hostedSessions: 0, pids,
       })
     }
