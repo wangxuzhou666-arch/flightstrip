@@ -136,7 +136,7 @@ appendFileSync(${JSON.stringify(join(dir, 'calls.jsonl'))}, JSON.stringify({ pro
 const english = /Write in English|plain English|English name/.test(prompt)
 let result
 if (prompt.includes('"done"')) result = JSON.stringify({ done: [1], progress: english ? 'Login works; waiting for review.' : '登录已经好了，等人看。' })
-else if (/English name|16 个汉字/.test(prompt)) result = input.split('\\n').map((_, i) => '- ' + (english ? 'Name ' : '名字') + (i + 1)).join('\\n')
+else if (/English name|16 个汉字/.test(prompt)) result = input.split('\\n').map((_, i) => (i + 1) + '. ' + (english ? 'Name ' : '名字') + (i + 1)).join('\\n')
 else result = english ? '- Fix the login\\n- Ship it' : '- 修好登录\\n- 上线'
 console.log(JSON.stringify({ result, num_turns: 1, total_cost_usd: 0.0001 }))
 `)

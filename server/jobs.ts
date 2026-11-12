@@ -4,7 +4,11 @@
 // gets no notice and its output file is gone too, so those are not shown at all.
 // Measured 2026-11-08: the output file stays after the task ends, with [exited with code N] as its last line; a task
 // stopped with TaskStop gets no notice and its last line is [killed]. When the notice was missed or never came, that
-// line is the fallback for telling the job ended
+// line is the fallback for telling the job ended.
+// Measured 2026-11-11: some jobs have neither (stopped with TaskStop, or taken down when their session restarted), and
+// going by the last line alone showed them running for good, one for 28 hours. So a job whose output has been quiet for
+// a while is also checked for a process still writing its output file: while a job runs, its shell and command hold
+// their stdout / stderr open on that file, and once nothing writes it the job has ended
 import { execFile } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
 import { open, realpath } from 'node:fs/promises'
@@ -33,8 +37,12 @@ const LSOF_TIMEOUT_MS = 5_000
 // A file found being written isn't checked again for this long, so a running job whose last line happens to be an exit
 // line doesn't start lsof on every refresh
 const HELD_RECHECK_MS = 5_000
-// output file (real path) → when a process was last found writing it
-const heldAt = new Map<string, number>()
+// A running job whose output hasn't changed for this long is checked for a writer too; one found still being written
+// isn't checked again for the second figure
+const QUIET_PROBE_MS = 2 * 60_000
+const QUIET_RECHECK_MS = 60_000
+// output file (real path) → a process was found writing it, so no new check before this moment
+const heldUntil = new Map<string, number>()
 // A job with no notice and no output file is dropped from the record once it started this long ago (right after a
 // start the file may not exist yet, hence the wait)
 const GONE_AFTER_MS = 10 * 60_000
@@ -118,10 +126,10 @@ export async function jobsOf(raw: Record<string, RawJob>, nameOf: (description: 
     }
     const read = await tailOf(job.outputPath)
     if (read === null) continue
-    if (read.line !== null && EXIT_LINE.test(read.line)) toConfirm.push(job)
+    if (endHint(read, now) !== null) toConfirm.push(job)
     else shown.push(running(job, read))
   }
-  if (toConfirm.length > 0) shown.push(...(await confirmEnded(toConfirm)))
+  if (toConfirm.length > 0) shown.push(...(await confirmEnded(toConfirm, now)))
   return shown
     .map(({ job, tail, progress, lastOutputAt }) => ({
       id: job.id,
@@ -168,40 +176,38 @@ function running(job: RawJob, read: OutputRead): Shown {
   return { job, tail: clip(read.line), progress, lastOutputAt: read.size > 0 ? read.modifiedAt : null }
 }
 
-/** Jobs whose output ends with an exit line. No process writing it: the line ends the job, and that is written back to
- *  the raw record (the file isn't read again, a long-ended job is cleared on time, and a later official notice or a
- *  later write to the file can still correct it). A process still writing it: the job is running. lsof failed this
- *  time: no conclusion yet, so it still shows as running and the next pass checks again. No lsof on this machine: the
- *  line is all there is, so a job whose last line happens to be an exit line and that then stays silent shows as ended
- *  until it writes again */
-async function confirmEnded(jobs: RawJob[]): Promise<Shown[]> {
+/** Signs that a job may have ended: an exit line as the last line (which gives the status), or output quiet for a while
+ *  (no record of how it ended, so: stopped). null when neither */
+function endHint(read: OutputRead, now: number): JobStatus | null {
+  const exit = read.line?.match(EXIT_LINE)
+  if (exit) return exit[1] === undefined ? 'stopped' : exit[1] === '0' ? 'completed' : 'failed'
+  return now - read.modifiedAt >= QUIET_PROBE_MS ? 'stopped' : null
+}
+
+/** Jobs showing a sign of having ended. No process writing the output: the job ended, and that is written back to the
+ *  raw record (the file isn't read again, a long-ended job is cleared on time, and a later official notice or a later
+ *  write to the file can still correct it). A process still writing it: the job is running. lsof failed this time: no
+ *  conclusion yet, so it still shows as running and the next pass checks again. No lsof on this machine: only the exit
+ *  line can be trusted, so a job whose last line happens to be one and that then stays silent shows as ended until it
+ *  writes again, and a job that merely went quiet keeps showing as running */
+async function confirmEnded(jobs: RawJob[], now: number): Promise<Shown[]> {
   const paths = jobs.map((job) => job.outputPath as string)
   const real = await Promise.all(paths.map((path) => realpath(path).catch(() => path)))
-  const now = Date.now()
   // Expired entries are removed: once a job ends with a notice its file isn't checked again, so they would pile up
-  for (const [path, at] of heldAt) if (now - at >= HELD_RECHECK_MS) heldAt.delete(path)
-  const recentlyHeld = (path: string) => now - (heldAt.get(path) ?? -Infinity) < HELD_RECHECK_MS
-  const toProbe = real.filter((path) => !recentlyHeld(path))
+  for (const [path, until] of heldUntil) if (now >= until) heldUntil.delete(path)
+  const toProbe = real.filter((path) => !heldUntil.has(path))
   const written = toProbe.length === 0 ? new Set<string>() : await writtenFiles(toProbe)
-  if (written instanceof Set) {
-    for (const path of toProbe) {
-      if (written.has(path)) heldAt.set(path, now)
-      else heldAt.delete(path)
-    }
-  }
-  const held = (path: string) => recentlyHeld(path) || (written instanceof Set && written.has(path))
   const shown: Shown[] = []
   for (const [i, job] of jobs.entries()) {
-    // Something may have been written, or the command may have just exited, while lsof ran: read the last line again
+    // Something may have been written, or the command may have just exited, while lsof ran: read again
     const read = await tailOf(paths[i])
     if (read === null) continue
-    const exit = read.line?.match(EXIT_LINE)
-    if (!exit || held(real[i])) {
-      shown.push(running(job, read))
-      continue
-    }
-    const status: JobStatus = exit[1] === undefined ? 'stopped' : exit[1] === '0' ? 'completed' : 'failed'
-    if (written === 'failed') {
+    const status = endHint(read, now)
+    const exitLine = read.line !== null && EXIT_LINE.test(read.line)
+    const writing = written instanceof Set && written.has(real[i])
+    if (writing) heldUntil.set(real[i], now + (exitLine ? HELD_RECHECK_MS : QUIET_RECHECK_MS))
+    const unsure = written === 'failed' || (written === 'missing' && !exitLine)
+    if (status === null || writing || heldUntil.has(real[i]) || unsure) {
       shown.push(running(job, read))
       continue
     }
@@ -230,6 +236,7 @@ function probe(port: number): Promise<boolean> {
 }
 
 async function portLive(port: number, now: number): Promise<boolean> {
+  for (const [old, seen] of probes) if (now - seen.at >= PROBE_CACHE_MS * 12) probes.delete(old)
   const cached = probes.get(port)
   if (cached !== undefined && now - cached.at < PROBE_CACHE_MS) return cached.live
   const live = await probe(port)
@@ -237,13 +244,15 @@ async function portLive(port: number, now: number): Promise<boolean> {
   return live
 }
 
-/** The localhost and 127.0.0.1 spellings of one page count as one; the dashboard's own port doesn't count */
+/** The localhost and 127.0.0.1 spellings of one page count as one; the dashboard's own port doesn't count. An address
+ *  that doesn't parse (a port above 65535, a typo in the conversation) is skipped: one bad address must not leave the
+ *  whole strip unreadable */
 export async function pagesOf(raw: Record<string, number>, ownPort: number, now: number): Promise<PageRef[]> {
   const byPage = new Map<string, { url: string; port: number; label: string; lastAt: number }>()
   for (const [url, lastAt] of Object.entries(raw)) {
-    const parsed = new URL(url)
-    const port = Number(parsed.port)
-    if (port === ownPort) continue
+    const parsed = URL.canParse(url) ? new URL(url) : null
+    const port = Number(parsed?.port)
+    if (parsed === null || !Number.isInteger(port) || port < 1 || port === ownPort) continue
     const path = `${parsed.pathname === '/' ? '' : parsed.pathname}${parsed.search}`
     const label = `localhost:${port}${path}`
     const seen = byPage.get(label)

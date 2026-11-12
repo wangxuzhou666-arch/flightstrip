@@ -249,6 +249,9 @@ function Page({ snapshot, connection }: { snapshot: Snapshot | null; connection:
       </header>
       {langFailure !== null && <p className="error" role="alert">{langFailure}</p>}
 
+      {snapshot?.briefsPaused && (
+        <p className="banner banner--plain">{t('banner.briefsPaused', { reason: snapshot.briefsPaused })}</p>
+      )}
       {snapshot?.error && (
         <p className="banner banner--err">{t('banner.agentsError', { error: snapshot.error })}</p>
       )}

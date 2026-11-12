@@ -183,21 +183,24 @@ export interface Hog {
   /** What the page sends back to act on it */
   key: string
   name: string
-  /** app = all processes of one application; job = a big task a session started; sessions = all Claude sessions
-   *  together; system = processes of the operating system */
+  /** app = all processes of one application, or one process tree outside any application; job = a big task a session
+   *  started; sessions = all Claude sessions together; system = processes of the operating system */
   kind: 'app' | 'job' | 'sessions' | 'system'
   /** The same figure as Activity Monitor's Memory column, including compressed and swapped-out pages */
   memoryBytes: number
   /** 100 = one full core */
   cpuPercent: number
   processes: number
+  /** How many of them are stopped */
+  stopped: number
   /** job: the name of the session that started it */
   owner: string | null
   /** Whether the board offers to end it */
   killable: boolean
-  /** Whether it can be paused: only tasks a session started. A paused app would just hang with a spinner */
+  /** Whether it can be paused / resumed: tasks a session started can. A paused app would just hang with a spinner, so an
+   *  app only offers Resume, when it holds a stopped process */
   pausable: boolean
-  /** Paused (its processes are stopped), waiting for you to resume or end it */
+  /** Some of its processes are paused (stopped), waiting for you to resume or end it */
   paused: boolean
   /** How many Claude sessions run inside it: ending it takes them along */
   hostedSessions: number
@@ -210,7 +213,7 @@ export interface UsageWindow {
 
 export interface UsageReading {
   /** Where the latest report came from. statusline: written when a terminal session refreshes its status bar;
-   *  cache: the cache `claude -p /usage` refreshes every 2 minutes */
+   *  cache: the cache `claude -p /usage` refreshes on a timer (USAGE_REFRESH_MS in shared/defaults.ts) */
   source: 'statusline' | 'cache'
   at: number
   week: UsageWindow
@@ -239,6 +242,9 @@ export interface Snapshot {
   hogs: Hog[] | null
   /** Memory is tight, so the dashboard holds its own Haiku calls: todos and progress on the cards pause */
   briefsHeld: boolean
+  /** Haiku is stopped for another reason (switched off by the cost guard, the hourly cap reached): the reason, for
+   *  people; null while it writes as usual */
+  briefsPaused: string | null
   error: string | null
   /** False when FLIGHTSTRIP_BRIEFS=off: todos then come only from the session and progress stays empty,
    *  so the UI must not show a "still extracting" state */

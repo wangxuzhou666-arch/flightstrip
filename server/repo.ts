@@ -26,12 +26,17 @@ export async function projectOf(cwd: string): Promise<string | null> {
   } catch {
     // Not a git repo (or the directory is gone): keep the directory name as the project name
   }
+  // Usually a few dozen directories; should they pile up, the oldest goes first (a Map keeps insertion order)
+  if (projectCache.size >= CACHE_LIMIT) projectCache.delete(projectCache.keys().next().value as string)
   projectCache.set(cwd, name)
   return name
 }
 
 interface PrCacheEntry { fetchedAt: number; pr: PrRef | null; inFlight: boolean }
 const prCache = new Map<string, PrCacheEntry>()
+// A branch nobody asked about for this long is dropped: running for days would keep every branch ever touched
+const PR_FORGET_MS = 30 * 60_000
+const CACHE_LIMIT = 500
 const NO_PR_BRANCHES = new Set(['main', 'master', 'HEAD'])
 
 type CheckRun = { status?: string; conclusion?: string; state?: string }
@@ -56,6 +61,8 @@ async function fetchPr(cwd: string, branch: string): Promise<PrRef | null> {
 export function cachedPr(cwd: string, branch: string | null): PrRef | null {
   if (branch === null || NO_PR_BRANCHES.has(branch) || cwd === HOME) return null
   const key = `${cwd}\n${branch}`
+  const now = Date.now()
+  for (const [old, cached] of prCache) if (!cached.inFlight && now - cached.fetchedAt > PR_FORGET_MS) prCache.delete(old)
   const entry = prCache.get(key)
   const fresh = entry !== undefined && Date.now() - entry.fetchedAt < PR_TTL_MS
   if (!fresh && !entry?.inFlight) {

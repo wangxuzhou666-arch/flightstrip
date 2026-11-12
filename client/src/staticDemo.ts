@@ -36,7 +36,7 @@ function collect(): Snapshot {
   for (const sessionId of revived) retired.delete(sessionId)
   const snapshot: Snapshot = {
     takenAt: now, lang, windowMs: WINDOW_MS, strips: shown, retired: retiredRows, groups: groups.groups, ungroupedAt: groups.ungroupedAt,
-    usage: demoUsage(now), machine: demoMachine(now), hogs: demoHogs(now, pageT), briefsHeld: false, error: null, briefsEnabled: true,
+    usage: demoUsage(now), machine: demoMachine(now), hogs: demoHogs(now, pageT), briefsHeld: false, briefsPaused: null, error: null, briefsEnabled: true,
     contextLine: DEFAULT_CONTEXT_LINE,
   }
   // Through JSON like the SSE stream does: the page gets copies it can keep (groups are edited in place), and fields the wire would drop are dropped here too

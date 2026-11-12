@@ -12,6 +12,8 @@ import { config } from './config.ts'
 
 const PROJECTS_DIR = join(config.claudeDir, 'projects')
 const TAIL_BYTES = 768 * 1024
+// The most one incremental read catches up on; further behind than this counts as a first read
+const MAX_CATCH_UP = 8 * TAIL_BYTES
 
 /** What the agent did last. Kept as data, not text, because the digest outlives a language switch: collect.ts words it in the current language */
 export type LastAction = { kind: 'tool'; tool: string | null; hint: string | null } | { kind: 'answered' }
@@ -84,6 +86,10 @@ const WORKTREE_PATH = /(\/[^\s"'`\\]+?\/\.claude\/worktrees\/[\w.-]+)(?![\w.*$?{
 const JOB_STARTED = /with ID: (\w+)/
 const JOB_OUTPUT = /written to: (\S+?)\.?(?:\s|$)/
 const JOB_ENDED = /<task-id>(\w+)<\/task-id>[\s\S]*?<status>(\w+)<\/status>/g
+// A TaskStop result: toolUseResult carries task_id and a message starting with this (measured 2026-11-11). A job stopped
+// this way sometimes gets neither a completion notice nor [killed] at the end of its output, and without this it would
+// show as running for good
+const STOPPED_MESSAGE = 'Successfully stopped task'
 // Local pages: localhost / 127.0.0.1 with a port. API and health-check endpoints don't count as pages
 const LOCAL_URL = /https?:\/\/(?:localhost|127\.0\.0\.1):\d{2,5}(?:\/[^\s"'`)<>\]，。、\\]*)?/g
 const NOT_A_PAGE = /:\d+\/(?:api|health|docs|openapi)\b|\$/
@@ -100,6 +106,16 @@ const MIN_OPENING_LENGTH = 4
 
 // sessionId → transcript path. A session never changes directory, so a hit is cached forever
 const pathCache = new Map<string, string>()
+
+/** Drop the parsed state of sessions no longer listed: the dashboard runs for days, and ended sessions would pile up
+ *  (each one holding thousands of timestamps and job records) */
+export function forgetTranscripts(live: Set<string>): void {
+  for (const [sessionId, path] of pathCache) {
+    if (live.has(sessionId)) continue
+    pathCache.delete(sessionId)
+    cursors.delete(path)
+  }
+}
 
 export async function locateTranscript(sessionId: string): Promise<string | null> {
   const cached = pathCache.get(sessionId)
@@ -255,8 +271,10 @@ export async function digestTranscript(sessionId: string): Promise<TranscriptDig
     pruneJobs(cursor.digest, Date.now())
     return cursor.digest
   }
-  // First read, or the file got shorter (rewritten): start TAIL_BYTES before the end; the first line may be partial and is dropped
-  const restart = cursor === undefined || size < cursor.offset
+  // First read, or the file got shorter (rewritten), or it fell far behind (it grew by hundreds of MB while no board was
+  // open, and an incremental read would load all of that at once): start TAIL_BYTES before the end; the first line may be
+  // partial and is dropped. Background jobs started before the tail are still picked up by the streaming scan
+  const restart = cursor === undefined || size < cursor.offset || size - cursor.offset > MAX_CATCH_UP
   if (restart) cursor = freshCursor(path)
   const active = cursor as TranscriptCursor
   let start = restart ? Math.max(0, size - TAIL_BYTES) : active.offset
@@ -286,7 +304,7 @@ export async function digestTranscript(sessionId: string): Promise<TranscriptDig
 }
 
 /** Before the tail, only lines about background jobs matter: a substring check first, and only a hit is parsed */
-const JOB_LINE_HINTS = ['"name":"Bash"', 'backgroundTaskId', 'with ID: ', '<task-notification>']
+const JOB_LINE_HINTS = ['"name":"Bash"', 'backgroundTaskId', 'with ID: ', '<task-notification>', STOPPED_MESSAGE]
 // While scanning, results of foreground commands aren't parsed, so their entries are never removed: past SCAN_LAUNCHING
 // the oldest is dropped, so a long transcript doesn't pile every command it ever sent into memory. The rest are left
 // for the tail to finish: one reply can send dozens of commands at once with their results in the tail, so there is no
@@ -360,7 +378,8 @@ function pruneJobs(digest: TranscriptDigest, now: number): void {
 function notePages(digest: TranscriptDigest, text: string, at: number, pattern: RegExp, group: number): void {
   for (const match of text.matchAll(pattern)) {
     const url = match[group].replace(/["'.,;:!?]+$/, '')
-    if (url.match(LOCAL_URL)?.[0] === url && !NOT_A_PAGE.test(url)) digest.pages[url] = at
+    // URL.canParse keeps out addresses that can't exist, such as a port above 65535
+    if (url.match(LOCAL_URL)?.[0] === url && !NOT_A_PAGE.test(url) && URL.canParse(url)) digest.pages[url] = at
   }
 }
 
@@ -375,6 +394,8 @@ const ENDED_STATUS: Record<string, JobStatus> = { completed: 'completed', failed
 
 function noteUserBlocks(cursor: TranscriptCursor, row: Record<string, unknown>, at: number): void {
   const digest = cursor.digest
+  const stopped = stoppedTaskOf(row)
+  if (stopped !== undefined) markEnded(digest, stopped, 'stopped', at)
   for (const block of blocksOf(row)) {
     if (block.type === 'tool_result' && block.tool_use_id !== undefined) {
       const launch = cursor.launching.get(block.tool_use_id)
@@ -397,18 +418,28 @@ function backgroundTaskIdOf(row: Record<string, unknown>): string | undefined {
   return typeof result?.backgroundTaskId === 'string' && /^\w+$/.test(result.backgroundTaskId) ? result.backgroundTaskId : undefined
 }
 
+/** The job a TaskStop result stopped; undefined for any other entry */
+function stoppedTaskOf(row: Record<string, unknown>): string | undefined {
+  const result = row.toolUseResult as { task_id?: unknown; message?: unknown } | undefined
+  const stopped = typeof result?.message === 'string' && result.message.startsWith(STOPPED_MESSAGE)
+  return stopped && typeof result?.task_id === 'string' ? result.task_id : undefined
+}
+
+/** Record that a job ended. When its start entry lies before the tail we read there's no description, so it isn't
+ *  recorded. One ending shows up several times (enqueue, attachment, dequeue); only the first counts, and an ending
+ *  inferred from the output file can be corrected by the official record */
+function markEnded(digest: TranscriptDigest, id: string, status: JobStatus, at: number): void {
+  const job = digest.jobs[id]
+  if (job === undefined || (job.status !== null && job.endedFromOutput !== true)) return
+  job.status = status
+  job.endedAt = at
+  job.endedFromOutput = false
+}
+
 /** Reads which background jobs a completion notice says ended, and how */
 function noteJobEnds(digest: TranscriptDigest, text: string, at: number): void {
   if (!text.includes('<task-notification>')) return
-  for (const [, id, status] of text.matchAll(JOB_ENDED)) {
-    const job = digest.jobs[id]
-    // The start entry lies before the tail we read: no description, so it isn't recorded. One notice shows up several
-    // times (enqueue, attachment, dequeue); only the first counts
-    if (job === undefined || (job.status !== null && job.endedFromOutput !== true)) continue
-    job.status = ENDED_STATUS[status] ?? 'completed'
-    job.endedAt = at
-    job.endedFromOutput = false
-  }
+  for (const [, id, status] of text.matchAll(JOB_ENDED)) markEnded(digest, id, ENDED_STATUS[status] ?? 'completed', at)
 }
 
 /** A completion notice in the newer format: a queue-operation entry's content, or a queued_command attachment's prompt */
@@ -504,18 +535,26 @@ function noteBashLaunch(cursor: TranscriptCursor, block: ContentBlock, at: numbe
   cursor.launching.set(block.id, { description: description.slice(0, 200), command: input.command.slice(0, 400), startedAt: at, background: input.run_in_background === true })
 }
 
+// A subagent without finished isn't necessarily running: one you interrupted, or whose session was closed, never gets it
+// (measured 2026-11-11: 931 without it, most of them days old). A running subagent writes to its own record on every
+// model call and tool result, and one foreground tool call lasts at most 10 minutes, so this long without a write means
+// it isn't running
+const SUBAGENT_QUIET_MS = 15 * 60_000
+
 /** <sessionId>/subagents/*.meta.json; only running ones and ones that ended within the window */
-export async function readSubagents(transcriptPath: string, sinceMs: number): Promise<SubagentRow[]> {
+export async function readSubagents(transcriptPath: string, sinceMs: number, now = Date.now()): Promise<SubagentRow[]> {
   const dir = join(transcriptPath.replace(/\.jsonl$/, ''), 'subagents')
   if (!existsSync(dir)) return []
   const rows: SubagentRow[] = []
+  const modified = (path: string) => stat(path).then((info) => info.mtimeMs, () => null)
   for (const file of await readdir(dir)) {
     if (!file.endsWith('.meta.json')) continue
     const metaPath = join(dir, file)
     const meta = parseJsonLine(await readFile(metaPath, 'utf8'))
     if (meta === null) continue
-    const running = meta.finished !== true
-    if (!running && (await stat(metaPath)).mtimeMs < sinceMs) continue
+    const lastWrite = (await modified(metaPath.replace(/\.meta\.json$/, '.jsonl'))) ?? (await modified(metaPath)) ?? 0
+    const running = meta.finished !== true && now - lastWrite < SUBAGENT_QUIET_MS
+    if (!running && lastWrite < sinceMs) continue
     rows.push({
       id: file.replace(/^agent-|\.meta\.json$/g, ''),
       agentType: String(meta.agentType ?? 'agent'),

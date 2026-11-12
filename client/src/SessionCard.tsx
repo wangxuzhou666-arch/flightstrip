@@ -174,12 +174,24 @@ function TileLine({ strip, now, windowMs }: { strip: AgentStrip; now: number; wi
   )
 }
 
+// A summary older than the session's latest activity by this much leaves the tile: while Haiku is held (memory tight, the
+// hourly cap, the cost guard) or failing, the old summary would stay up describing what is long past. The drawer still
+// has it, with the time it was written
+const SUMMARY_STALE_MS = 15 * 60_000
+
+/** The three lines on a tile: a fresh summary; when the summary is stale, the latest activity; before any summary, the goal */
+export function tileSummary(strip: AgentStrip): string {
+  if (strip.progress === null) return strip.goal ?? strip.now
+  const stale = strip.progressAt === null || (strip.updatedAt !== null && strip.updatedAt - strip.progressAt > SUMMARY_STALE_MS)
+  return stale ? strip.now : strip.progress
+}
+
 export function SessionTile({ strip, now, windowMs, briefsEnabled, contextLine, open, onOpen }: {
   strip: AgentStrip; now: number; windowMs: number; briefsEnabled: boolean; contextLine: number; open: boolean; onOpen: () => void
 }) {
   const i18n = useI18n()
   const stage = stageOf(strip, now, i18n)
-  const summary = strip.progress ?? strip.goal ?? strip.now
+  const summary = tileSummary(strip)
   return (
     <li className="tile" id={`card-${strip.sessionId}`} data-tone={stage.tone} data-attn={strip.bay === 'needs' ? stage.tone : undefined}
       data-open={open || undefined} style={{ viewTransitionName: `card-${strip.sessionId.slice(0, 8)}` }}>

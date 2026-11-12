@@ -21,7 +21,7 @@ import { LANGS, type Lang } from '../shared/i18n/index.ts'
 import type { TodoItem } from '../shared/types.ts'
 import { memoryTight } from './alerts.ts'
 import { config } from './config.ts'
-import { currentLang } from './lang.ts'
+import { currentLang, serverT } from './lang.ts'
 
 const runFile = promisify(execFile)
 
@@ -65,9 +65,9 @@ const PROMPTS: Record<Lang, PromptSet> = {
       'done 里保留清单上标了已完成的编号；其余只有记录里明确说已经做完的才算，拿不准就不算。',
     ].join(''),
     name: [
-      '下面每行是一条后台命令的英文说明。给每条起一个不超过 16 个汉字的中文名，像跟不懂技术的人说它在干嘛。',
+      '下面每行是一条编了号的后台命令英文说明。给每条起一个不超过 16 个汉字的中文名，像跟不懂技术的人说它在干嘛。',
       '保留 #编号、PR 号和数字，不加解释，不出现文件名和命令。',
-      '按原顺序每行输出一个，以「- 」开头，行数和输入一样，不输出别的。',
+      '每条输出一行，写成「编号. 中文名」，编号和输入一致，不输出别的。',
     ].join(''),
     openingLine: (number, text) => `第 ${number} 句：${text}`,
     checklistHeading: '待办清单：',
@@ -94,9 +94,9 @@ const PROMPTS: Record<Lang, PromptSet> = {
       'In done, keep the numbers the list marks as finished; add others only if the record clearly says they are finished, and when unsure leave them out.',
     ].join(''),
     name: [
-      'Each line below is the description of a background command, written in Chinese. Give each one a plain-language English name of at most 6 words, as if telling someone who is not technical what it does. ',
+      'Each line below is the numbered description of a background command, written in Chinese. Give each one a plain-language English name of at most 6 words, as if telling someone who is not technical what it does. ',
       'Keep #numbers, PR numbers and digits; add no explanation; no file names or commands. ',
-      'Output one name per line in the original order, each starting with "- ", with exactly as many lines as the input, and nothing else.',
+      'Output one line per description, written as "number. name" with the same number as the input, and nothing else.',
     ].join(''),
     openingLine: (number, text) => `Message ${number}: ${text}`,
     checklistHeading: 'To-do list:',
@@ -110,6 +110,10 @@ const PROMPTS: Record<Lang, PromptSet> = {
   },
 }
 const NAME_BATCH = 12
+// A description gets at most this many naming attempts, counted on disk; after that it keeps its original text. Failures
+// used to retry every 15 minutes forever, counted only in memory, so every restart tried again at once (2026-11-11 log:
+// 285 of 446 naming calls were repeats)
+const NAME_ATTEMPTS = 3
 
 // One entry per session
 interface BriefEntry {
@@ -120,6 +124,10 @@ interface BriefEntry {
   done: number[]
   progressAt: number | null
   failedAt: number | null
+  /** Failures in a row, cleared on success; decides how long until the next try */
+  failures?: number
+  /** When it was last on the board: entries gone for long are dropped when saving */
+  seenAt?: number
 }
 
 export interface BriefJob {
@@ -146,7 +154,17 @@ export interface Brief {
 
 // A still-running session's progress updates at most this often; a finished turn updates immediately
 const WORKING_REFRESH_MS = 10 * 60_000
+// At least this long between two progress updates of one session: around a permission prompt the state flips several
+// times a minute, and each flip used to rewrite the progress (2026-11-11 log: 26% of calls came within a minute of the
+// previous one)
+const PROGRESS_MIN_GAP_MS = 2 * 60_000
+// The first retry after a failure waits this long; each further failure doubles it, up to RETRY_MAX_MS
 const RETRY_AFTER_MS = 15 * 60_000
+const RETRY_MAX_MS = 4 * 3_600_000
+// A session not on the board for this long loses its todos and progress; at most this many job names are kept (oldest
+// dropped first)
+const FORGET_SESSION_MS = 30 * 24 * 3_600_000
+const KEEP_NAMES = 2000
 // Runaway guard: at most this many calls per hour; a single call costing more than the cap disables everything
 const CALLS_PER_HOUR = 90
 const MAX_CALL_COST_USD = 0.02
@@ -156,17 +174,23 @@ const CALL_TIMEOUT_MS = 90_000
 let cwd: string | null = null
 let cachePath: string | null = null
 let namesPath: string | null = null
+let nameFailuresPath: string | null = null
 type ByLang<T> = Record<Lang, Record<string, T>>
+type NameFailure = { attempts: number; lastAt: number }
 // Description in the other language → name in this one, and sessionId → todos and progress, both per language
 let names: ByLang<string> = { en: {}, zh: {} }
 let entries: ByLang<BriefEntry> = { en: {}, zh: {} }
+// Description → how many naming attempts failed and when the last one did, per language
+let nameFailures: ByLang<NameFailure> = { en: {}, zh: {} }
 // Descriptions waiting for a name; which language they get one in is decided when the batch runs
 const pendingNames = new Set<string>()
-let namesRetryAt = 0
+// Being named now ("lang\ndescription"): every collection asks again before the answer is back, and must not queue it again
+const naming = new Set<string>()
 let onUpdate: () => void = () => {}
 const pending = new Map<string, BriefJob>()
 let working = false
-let disabledReason: string | null = null
+// Set when the cost guard trips: what one call cost and how many turns it took
+let disabled: { cost: number | undefined; turns: number | undefined } | null = null
 const recentCalls: number[] = []
 
 /** Reads a cache file of the shape { en: {…}, zh: {…} }. A missing, corrupt or older-format file (a flat map) reads as empty: it is rebuilt as the board is used */
@@ -194,9 +218,33 @@ export async function startBriefs(onDone: () => void): Promise<void> {
   cwd = config.stateDir
   cachePath = join(cwd, 'briefs.json')
   namesPath = join(cwd, 'job-names.json')
+  nameFailuresPath = join(cwd, 'job-names-failed.json')
   onUpdate = onDone
   entries = await readByLang<BriefEntry>(cachePath)
   names = await readByLang<string>(namesPath)
+  nameFailures = await readByLang<NameFailure>(nameFailuresPath)
+}
+
+/** Backoff: after `failures` failures in a row, how long until the next try */
+function retryDelay(failures: number): number {
+  return Math.min(RETRY_MAX_MS, RETRY_AFTER_MS * 2 ** Math.max(0, failures - 1))
+}
+
+/** Whether a description can be named in this language now: it needs a name and has none, isn't being named, hasn't
+ *  used up its attempts, and its last failure was long enough ago */
+function canName(description: string, lang: Lang, now: number): boolean {
+  if (!needsName(description, lang) || names[lang][description] !== undefined || naming.has(`${lang}\n${description}`)) return false
+  const failed = nameFailures[lang][description]
+  return failed === undefined || (failed.attempts < NAME_ATTEMPTS && now - failed.lastAt >= retryDelay(failed.attempts))
+}
+
+/** Why Haiku isn't writing todos and progress right now; null while it writes as usual. Memory pressure is briefsHeld */
+export function briefsPausedReason(now = Date.now()): string | null {
+  if (disabled !== null) return serverT('briefs.paused.cost', { cost: String(disabled.cost ?? '?'), turns: String(disabled.turns ?? '?') })
+  const lastHour = recentCalls.filter((at) => now - at <= 3_600_000)
+  if (lastHour.length < CALLS_PER_HOUR) return null
+  const resume = new Date(lastHour[0] + 3_600_000)
+  return serverT('briefs.paused.hourly', { count: CALLS_PER_HOUR, time: `${resume.getHours()}:${String(resume.getMinutes()).padStart(2, '0')}` })
 }
 
 const HAS_CHINESE = /[\u4e00-\u9fff]/
@@ -212,7 +260,7 @@ export function jobNameOf(description: string): string {
   if (!needsName(description, lang)) return description
   const name = names[lang][description]
   if (name !== undefined) return name
-  if (cwd !== null && disabledReason === null) {
+  if (cwd !== null && disabled === null && canName(description, lang, Date.now())) {
     pendingNames.add(description)
     void drain()
   }
@@ -243,15 +291,17 @@ function needsTodos(job: BriefJob, entry: BriefEntry | undefined): boolean {
 
 function needsProgress(job: BriefJob, entry: BriefEntry | undefined, now: number): boolean {
   if (job.recent.length === 0 || entry?.progressKey === job.activityKey) return false
+  if (entry?.progressAt != null && now - entry.progressAt < PROGRESS_MIN_GAP_MS) return false
   return job.settled || entry?.progressAt == null || now - entry.progressAt > WORKING_REFRESH_MS
 }
 
 /** collect calls this every round for the strips on display; unchanged ones are skipped and cost nothing */
 export function requestBrief(job: BriefJob): void {
-  if (cwd === null || disabledReason !== null) return
+  if (cwd === null || disabled !== null) return
   const now = Date.now()
   const entry = entries[currentLang()][job.sessionId]
-  if (entry?.failedAt != null && now - entry.failedAt < RETRY_AFTER_MS) return
+  if (entry !== undefined) entry.seenAt = now
+  if (entry?.failedAt != null && now - entry.failedAt < retryDelay(entry.failures ?? 1)) return
   if (!needsTodos(job, entry) && !needsProgress(job, entry, now)) return
   pending.set(job.sessionId, job)
   void drain()
@@ -261,7 +311,7 @@ async function drain(): Promise<void> {
   if (working) return
   working = true
   try {
-    while ((pending.size > 0 || pendingNames.size > 0) && disabledReason === null) {
+    while ((pending.size > 0 || pendingNames.size > 0) && disabled === null) {
       const now = Date.now()
       while (recentCalls.length > 0 && now - recentCalls[0] > 3_600_000) recentCalls.shift()
       if (recentCalls.length >= CALLS_PER_HOUR) break
@@ -269,10 +319,11 @@ async function drain(): Promise<void> {
       // The queue stays; the next collection knocks again
       if (memoryTight()) break
       // Naming handles a whole batch in one call, so do it first
-      if (pendingNames.size > 0 && now >= namesRetryAt) {
-        await runNames()
-        await saveNames()
-        onUpdate()
+      if (pendingNames.size > 0) {
+        if (await runNames()) {
+          await saveNames()
+          onUpdate()
+        }
         continue
       }
       if (pending.size === 0) break
@@ -282,6 +333,10 @@ async function drain(): Promise<void> {
       await save()
       onUpdate()
     }
+  } catch (err) {
+    // Saving failed (disk full, directory gone) and the like: stop this round, the next request picks the queue up again;
+    // it must not become an unhandled rejection that takes the server down
+    console.warn('[brief] queue interrupted:', err)
   } finally {
     working = false
   }
@@ -322,44 +377,107 @@ async function runJob(job: BriefJob): Promise<void> {
       entry.progressAt = Date.now()
     }
     entry.failedAt = null
+    entry.failures = 0
   } catch (err) {
-    // This one failed this time: retry after a while; the strip shows the verbatim opening in the meantime
+    // This one failed this time: retry after a while, longer after each failure in a row; the strip shows the verbatim
+    // opening in the meantime
     entry.failedAt = Date.now()
-    console.warn(`[brief] ${job.sessionId.slice(0, 8)}: ${(err as Error).message.split('\n')[0]}`)
+    entry.failures = (entry.failures ?? 0) + 1
+    console.warn(`[brief] ${job.sessionId.slice(0, 8)}: ${(err as Error).message}`)
   }
 }
 
-async function runNames(): Promise<void> {
+/** Haiku's "number. name" lines, matched by number: explanations, blank lines and unknown numbers don't count */
+export function parseNames(reply: string, count: number, limit: number): Map<number, string> {
+  const named = new Map<number, string>()
+  for (const line of reply.split('\n')) {
+    const match = /^\s*(?:[-*•]\s*)?(\d+)\s*[.、:：)）]\s*(.+?)\s*$/.exec(line)
+    if (match === null) continue
+    const index = Number(match[1])
+    if (index >= 1 && index <= count && !named.has(index)) named.set(index, match[2].length > limit ? `${match[2].slice(0, limit)}…` : match[2])
+  }
+  return named
+}
+
+/** Name one batch. What didn't get a name (the call failed, or the reply lacks its number) counts one failed attempt and
+ *  is tried again later. Returns whether a call was made */
+async function runNames(): Promise<boolean> {
   const lang = currentLang()
-  // Things may have changed since these were queued: the page may have switched language, and jobNameOf asks again on
-  // every round, so a description can be queued again while its own batch is still running. Drop whatever no longer needs a name
-  for (const description of [...pendingNames]) {
-    if (!needsName(description, lang) || names[lang][description] !== undefined) pendingNames.delete(description)
-  }
+  const now = Date.now()
+  // Things may have changed since these were queued (the page may have switched language): drop whatever can't be named now
+  for (const description of [...pendingNames]) if (!canName(description, lang, now)) pendingNames.delete(description)
   const batch = [...pendingNames].slice(0, NAME_BATCH)
-  for (const description of batch) pendingNames.delete(description)
-  if (batch.length === 0) return
-  const { nameLimit, name: prompt } = PROMPTS[lang]
-  try {
-    const reply = await askHaiku(`naming ${batch.length}`, prompt, batch.map((d) => d.replace(/\s+/g, ' ')).join('\n'))
-    const lines = reply.split('\n').map((line) => line.trim().replace(/^[-*•]\s*/, '').trim()).filter(Boolean)
-    if (lines.length !== batch.length) throw new Error(`naming returned ${lines.length} lines for ${batch.length} items`)
-    batch.forEach((description, i) => {
-      names[lang][description] = lines[i].length > nameLimit ? `${lines[i].slice(0, nameLimit)}…` : lines[i]
-    })
-  } catch (err) {
-    // This batch shows the original text for now and retries after a while
-    namesRetryAt = Date.now() + RETRY_AFTER_MS
-    for (const description of batch) pendingNames.add(description)
-    console.warn(`[brief] naming failed: ${(err as Error).message.split('\n')[0]}`)
+  if (batch.length === 0) return false
+  for (const description of batch) {
+    pendingNames.delete(description)
+    naming.add(`${lang}\n${description}`)
   }
+  const { nameLimit, name: prompt } = PROMPTS[lang]
+  let named = new Map<number, string>()
+  try {
+    const input = batch.map((d, i) => `${i + 1}. ${d.replace(/\s+/g, ' ')}`).join('\n')
+    named = parseNames(await askHaiku(`naming ${batch.length}`, prompt, input), batch.length, nameLimit)
+    if (named.size < batch.length) console.warn(`[brief] naming answered ${named.size}/${batch.length}; the rest is retried later`)
+  } catch (err) {
+    console.warn(`[brief] naming failed: ${(err as Error).message}`)
+  } finally {
+    batch.forEach((description, i) => {
+      naming.delete(`${lang}\n${description}`)
+      const name = named.get(i + 1)
+      if (name !== undefined) {
+        names[lang][description] = name
+        delete nameFailures[lang][description]
+      } else {
+        nameFailures[lang][description] = { attempts: (nameFailures[lang][description]?.attempts ?? 0) + 1, lastAt: now }
+      }
+    })
+  }
+  return true
+}
+
+/** Only the latest `limit` entries of each language (string keys keep the order they were added in) */
+function keepLatest<T>(byLang: ByLang<T>, limit: number): ByLang<T> {
+  const trim = (record: Record<string, T>) => {
+    const keys = Object.keys(record)
+    return keys.length <= limit ? record : Object.fromEntries(keys.slice(-limit).map((key) => [key, record[key]]))
+  }
+  return { en: trim(byLang.en), zh: trim(byLang.zh) }
 }
 
 async function saveNames(): Promise<void> {
-  if (namesPath === null) return
-  const temp = `${namesPath}.tmp`
-  await writeFile(temp, JSON.stringify(names))
-  await rename(temp, namesPath)
+  names = keepLatest(names, KEEP_NAMES)
+  nameFailures = keepLatest(nameFailures, KEEP_NAMES)
+  if (namesPath !== null) await writeAtomic(namesPath, names)
+  if (nameFailuresPath !== null) await writeAtomic(nameFailuresPath, nameFailures)
+}
+
+async function writeAtomic(path: string, value: unknown): Promise<void> {
+  const temp = `${path}.tmp`
+  await writeFile(temp, JSON.stringify(value))
+  await rename(temp, path)
+}
+
+interface HaikuReply {
+  result?: string
+  is_error?: boolean
+  num_turns?: number
+  total_cost_usd?: number
+}
+
+function parseReply(stdout: string): HaikuReply | null {
+  try {
+    return JSON.parse(stdout) as HaikuReply
+  } catch {
+    return null
+  }
+}
+
+/** The cost guard: one call over MAX_CALL_COST_USD, or more than one turn (it must not use tools), switches everything off */
+function guardCost(reply: HaikuReply): void {
+  if ((reply.total_cost_usd ?? 0) > MAX_CALL_COST_USD || (reply.num_turns ?? 0) > 1) {
+    disabled = { cost: reply.total_cost_usd, turns: reply.num_turns }
+    console.warn(`[brief] one call cost ${reply.total_cost_usd} USD over ${reply.num_turns} turns, more than expected; summaries are now off`)
+  }
 }
 
 async function askHaiku(label: string, systemPrompt: string, input: string): Promise<string> {
@@ -375,15 +493,25 @@ async function askHaiku(label: string, systemPrompt: string, input: string): Pro
     { cwd: cwd as string, timeout: CALL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, MAX_THINKING_TOKENS: '0' } },
   )
   child.child.stdin?.end(input)
-  const { stdout } = await child
-  const reply = JSON.parse(stdout) as { result?: string; is_error?: boolean; num_turns?: number; total_cost_usd?: number }
-  if ((reply.total_cost_usd ?? 0) > MAX_CALL_COST_USD || (reply.num_turns ?? 0) > 1) {
-    disabledReason = `one call cost ${reply.total_cost_usd} USD over ${reply.num_turns} turns, more than expected; summaries are now off`
-    console.warn(`[brief] ${disabledReason}`)
+  let stdout: string
+  try {
+    ({ stdout } = await child)
+  } catch (err) {
+    // A non-zero exit often still prints JSON (is_error, what the call cost): it goes through the cost guard all the
+    // same, and the log gets the real cause instead of a bare "Command failed"
+    const failure = err as Error & { stdout?: string; stderr?: string; code?: number | string; killed?: boolean }
+    const reply = parseReply(failure.stdout ?? '')
+    if (reply !== null) guardCost(reply)
+    const how = failure.killed ? 'timed out' : `exit code ${failure.code ?? '?'}`
+    const why = reply?.result ?? ((failure.stderr ?? '').trim().split('\n').at(-1) || failure.message.split('\n')[0])
+    throw new Error(`${label}: the Haiku call failed (${how}): ${why.slice(0, 300)}`)
   }
+  const reply = parseReply(stdout)
+  if (reply === null) throw new Error(`${label}: Haiku's output isn't JSON: ${stdout.slice(0, 200)}`)
+  guardCost(reply)
   // Log the cost of every call on one line so the log can be reconciled
   console.log(`[brief] ${label} ${reply.total_cost_usd ?? '?'} USD`)
-  if (reply.is_error === true || typeof reply.result !== 'string') throw new Error(`Haiku returned no result: ${stdout.slice(0, 200)}`)
+  if (reply.is_error === true || typeof reply.result !== 'string') throw new Error(`${label}: Haiku returned no result: ${String(reply.result ?? stdout).slice(0, 200)}`)
   return reply.result
 }
 
@@ -405,8 +533,11 @@ function parseProgress(text: string, limit: number): { done: number[]; progress:
 }
 
 async function save(): Promise<void> {
-  if (cachePath === null) return
-  const temp = `${cachePath}.tmp`
-  await writeFile(temp, JSON.stringify(entries))
-  await rename(temp, cachePath)
+  const now = Date.now()
+  for (const lang of LANGS) {
+    for (const [sessionId, entry] of Object.entries(entries[lang])) {
+      if (now - (entry.seenAt ?? entry.progressAt ?? entry.failedAt ?? now) > FORGET_SESSION_MS) delete entries[lang][sessionId]
+    }
+  }
+  if (cachePath !== null) await writeAtomic(cachePath, entries)
 }

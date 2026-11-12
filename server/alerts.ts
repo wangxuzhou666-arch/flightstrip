@@ -9,7 +9,8 @@ import { execFile } from 'node:child_process'
 import { platform } from 'node:os'
 import type { MemoryPressure } from '../shared/types.ts'
 import { config } from './config.ts'
-import { topHog } from './hogs.ts'
+import { suggested } from '../shared/hogs.ts'
+import { currentHogs } from './hogs.ts'
 import { serverT } from './lang.ts'
 import { DARWIN_PRESSURE, parseSwapUsed } from './resources.ts'
 
@@ -24,7 +25,12 @@ const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1).replace(/\.0$/, 
 
 function run(file: string, args: string[]): Promise<string | null> {
   return new Promise((done) => {
-    execFile(file, args, { timeout: 5_000 }, (err, stdout) => done(err === null ? stdout : null))
+    execFile(file, args, { timeout: 5_000 }, (err, stdout, stderr) => {
+      // A failure is logged: a notification that never went out, a sysctl that can't be read; otherwise the alert stops
+      // working without anyone knowing
+      if (err !== null) console.warn(`[alerts] ${new Date().toISOString()} ${file} failed: ${stderr.trim().split('\n').at(-1) || err.message.split('\n')[0]}`)
+      done(err === null ? stdout : null)
+    })
   })
 }
 
@@ -51,17 +57,22 @@ async function check(): Promise<void> {
   if (!config.alertsEnabled || tightChecks < SUSTAINED_CHECKS) return
   const escalated = lastNotified !== null && RANK[level] > RANK[lastNotified.level]
   if (lastNotified !== null && !escalated && Date.now() - lastNotified.at < COOLDOWN_MS) return
-  lastNotified = { at: Date.now(), level }
-  const hog = await topHog()
+  const hogs = await currentHogs()
+  const biggest = hogs[0] ?? null
+  // The advice is the row the board marks "handle first"; the rule is in shared/hogs.ts
+  const advice = suggested(hogs)
   const swap = parseSwapUsed(swapLine)
   const parts = [
-    hog === null ? null : serverT(hog.pausable && !hog.paused ? 'alert.hogPausable' : 'alert.hog', { name: hog.name, size: gb(hog.memoryBytes) }),
+    biggest === null ? null : serverT('alert.hog', { name: biggest.name, size: gb(biggest.memoryBytes) }),
+    advice === null ? null : serverT(advice.pausable ? 'alert.advice.pause' : 'alert.advice.end', { name: advice.name }),
     swap === null || swap === 0 ? null : serverT('alert.swap', { size: gb(swap) }),
   ].filter((part) => part !== null)
   const body = parts.length > 0 ? serverT('alert.body', { facts: parts.join(serverT('sep.comma')) }) : serverT('alert.bodyPlain')
   const title = serverT(level === 'critical' ? 'alert.title.critical' : 'alert.title.warn')
   // The text goes in as arguments, not into the script, so a quote in a process name can't break out
-  await run('/usr/bin/osascript', ['-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)', '-e', 'end run', title, body])
+  const sent = await run('/usr/bin/osascript', ['-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)', '-e', 'end run', title, body])
+  // The cooldown starts once it went out; one that didn't is tried again next round (30 s), not after half an hour
+  if (sent !== null) lastNotified = { at: Date.now(), level }
 }
 
 /** macOS only: elsewhere there is no pressure level to go by. Not in demo mode, which reads nothing from the machine */

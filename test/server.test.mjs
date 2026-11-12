@@ -3,7 +3,7 @@
 // ~/.claude and ~/.flightstrip are never involved.
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -90,10 +90,14 @@ async function snapshots(url, count) {
   return found
 }
 
+/** url → the write token of a real (non-demo) server: the page gets it from the paired link the CLI opens */
+const tokens = new Map()
+
 async function post(url, path, body) {
+  const token = tokens.get(url)
   const res = await fetch(`${url}${path}`, {
     method: 'POST', body: JSON.stringify(body),
-    headers: { 'Content-Type': 'application/json', 'X-Flightstrip': '1', Origin: url },
+    headers: { 'Content-Type': 'application/json', 'X-Flightstrip': '1', Origin: url, ...(token ? { 'X-Flightstrip-Token': token } : {}) },
   })
   return { status: res.status, body: await res.json() }
 }
@@ -276,6 +280,48 @@ test('a bad FLIGHTSTRIP_* value is reported in one sentence, not a stack trace',
   assert.doesNotMatch(run.errors(), /\n\s+at /)
 })
 
+// ---- pairing ----
+
+// Any page on this machine could reach 127.0.0.1, and a local program can send any Origin it likes: the header and origin
+// checks stop a web page, the token stops the rest. The page gets the token from the link the CLI opens
+test('pairing: a real server takes writes only with the token from its state dir, and the CLI opens the paired link without printing it', async () => {
+  const box = sandbox()
+  rmSync(join(box.home, '.claude'), { recursive: true })
+  const port = await freePort()
+  const url = `http://127.0.0.1:${port}`
+  const run = runCli([], { ...box.env, PORT: String(port), FLIGHTSTRIP_BRIEFS: 'off' }, /flightstrip is running|could not start/)
+  await run.started
+  const tokenFile = join(box.home, '.flightstrip', 'write-token')
+  const token = readFileSync(tokenFile, 'utf8').trim()
+  assert.match(token, /^[0-9a-f]{64}$/)
+  assert.equal(statSync(tokenFile).mode & 0o777, 0o600, 'only you can read it')
+
+  const send = (extra) => fetch(`${url}/api/settings`, { method: 'POST', body: JSON.stringify({ lang: 'en' }), headers: { 'Content-Type': 'application/json', 'X-Flightstrip': '1', Origin: url, ...extra } })
+  const missing = await send({})
+  assert.equal(missing.status, 401)
+  assert.match((await missing.json()).error, /flightstrip/, 'the reply says how to pair: run flightstrip again')
+  assert.equal((await send({ 'X-Flightstrip-Token': 'f'.repeat(64) })).status, 401, 'a wrong token')
+  assert.equal((await send({ 'X-Flightstrip-Token': token.slice(1) })).status, 401, 'a token of the wrong length')
+  assert.equal((await send({ 'X-Flightstrip-Token': token })).status, 200)
+
+  assert.match(await waitForFile(box.calls), new RegExp(`open ${url}/#t=${token}`), 'the browser opens the paired link')
+  assert.ok(!(run.output() + run.errors()).includes(token), 'the token never reaches the terminal')
+  run.child.kill()
+  await run.exited
+
+  // A restart keeps the token, so a page paired before still works
+  const again = await startReal({}, box)
+  assert.equal(readFileSync(tokenFile, 'utf8').trim(), token)
+  again.run.child.kill()
+})
+
+test('pairing: demo mode needs no token and writes no token file', async () => {
+  const demo = await startDemo()
+  assert.equal((await post(demo.url, '/api/settings', { lang: 'zh' })).status, 200)
+  assert.equal(existsSync(join(demo.home, '.flightstrip')), false)
+  demo.run.child.kill()
+})
+
 // ---- language ----
 
 /** A server on a real (non-demo) HOME with no ~/.claude, so only what the test puts in place is read */
@@ -284,7 +330,10 @@ async function startReal(extraEnv = {}, box = sandbox()) {
   const env = { ...box.env, PORT: String(port), FLIGHTSTRIP_BRIEFS: 'off', ...extraEnv }
   const run = runCli(['--no-open'], env, /flightstrip is running|could not start/)
   await run.started
-  return { ...box, port, url: `http://127.0.0.1:${port}`, env, run }
+  const url = `http://127.0.0.1:${port}`
+  const tokenFile = join(env.FLIGHTSTRIP_STATE_DIR ?? join(box.home, '.flightstrip'), 'write-token')
+  if (existsSync(tokenFile)) tokens.set(url, readFileSync(tokenFile, 'utf8').trim())
+  return { ...box, port, url, env, run, tokenFile }
 }
 
 test('lang: FLIGHTSTRIP_LANG sets the first language, the toggle switches it, and the server text follows', async () => {
@@ -482,20 +531,29 @@ test('background jobs: a running one shows its progress, when it last printed an
   mkdirSync(tasks)
   writeFileSync(join(custom, 'sessions', `${process.pid}.json`), JSON.stringify({ sessionId, pid: process.pid, name: 'PROGRESS-SESSION', cwd: box.home, startedAt: Date.now(), status: 'busy', entrypoint: 'cli' }))
   const output = (id) => join(tasks, `${id}.output`)
-  // A step header followed by its log: the bar comes from the header, and the last line is still shown under it
-  writeFileSync(output('stepping'), '==> [3/8] Sync code\ncopying 12 files\n')
+  /** A real process with the output file as its stdout, as Claude Code starts one; its child counts too */
+  const hold = (id) => {
+    const fd = openSync(output(id), 'a')
+    const holder = spawn('/bin/sh', ['-c', 'sleep 60 & wait'], { stdio: ['ignore', fd, fd] })
+    closeSync(fd)
+    children.push(holder)
+    return holder
+  }
   const quietSince = Date.now() - 10 * 60_000
+  // A step header followed by its log: the bar comes from the header, and the last line is still shown under it.
+  // Quiet for ten minutes, but its process still holds the output open, so it is running
+  writeFileSync(output('stepping'), '==> [3/8] Sync code\ncopying 12 files\n')
+  const steppingHolder = hold('stepping')
   utimesSync(output('stepping'), quietSince / 1000, quietSince / 1000)
+  // Quiet just as long with no process left writing it: it ended without a notice (stopped by a restart, say)
+  writeFileSync(output('abandoned'), '==> [5/8] Build\n')
+  utimesSync(output('abandoned'), quietSince / 1000, quietSince / 1000)
   // Nothing printed yet: no time to judge a stall by
   writeFileSync(output('silent'), '')
-  // A real process with the output file as its stdout, as Claude Code starts one; its child counts too
   writeFileSync(output('held'), 'serving\n')
-  const fd = openSync(output('held'), 'a')
-  const holder = spawn('/bin/sh', ['-c', 'sleep 60 & wait'], { stdio: ['ignore', fd, fd] })
-  closeSync(fd)
-  children.push(holder)
+  const holder = hold('held')
   const at = new Date().toISOString()
-  const rows = ['stepping', 'silent', 'held'].flatMap((id) => [
+  const rows = ['stepping', 'abandoned', 'silent', 'held'].flatMap((id) => [
     { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: `tu-${id}`, name: 'Bash', input: { command: `run ${id}`, description: `Job ${id}`, run_in_background: true } }], usage: { input_tokens: 10 } } },
     { type: 'user', timestamp: at, toolUseResult: { stdout: '', backgroundTaskId: id }, message: { content: [{ type: 'tool_result', tool_use_id: `tu-${id}`, content: `Command running in background with ID: ${id}. Output is being written to: ${output(id)}. You will be notified when it completes` }] } },
   ])
@@ -510,7 +568,10 @@ test('background jobs: a running one shows its progress, when it last printed an
   assert.deepEqual(shown.stepping.progress, { fraction: 3 / 8, mark: '3/8', label: 'Sync code', lineIsTail: false })
   assert.equal(shown.stepping.tail, 'copying 12 files')
   assert.equal(Math.round(shown.stepping.lastOutputAt / 1000), Math.round(quietSince / 1000), 'the output file\'s change time is when it last printed')
-  assert.equal(shown.stepping.usage, null, 'no process writes its output file, so there is nothing to measure')
+  assert.ok(shown.stepping.usage?.processes >= 1, 'quiet output is no ending while a process still holds it')
+  assert.equal(shown.abandoned.status, 'stopped', 'quiet output with no process writing it: ended')
+  assert.equal(Math.round(shown.abandoned.endedAt / 1000), Math.round(quietSince / 1000), 'it ended when it last printed')
+  assert.deepEqual([shown.abandoned.tail, shown.abandoned.progress, shown.abandoned.usage], [null, null, null], 'an ended job shows nothing live')
   assert.equal(shown.silent.lastOutputAt, null)
   assert.equal(shown.silent.progress, null)
   const usage = shown.held.usage
@@ -530,6 +591,7 @@ test('background jobs: a running one shows its progress, when it last printed an
   assert.equal(stepping.tail, 'still syncing')
   assert.deepEqual(stepping.progress, { fraction: 3 / 8, mark: '3/8', label: 'Sync code', lineIsTail: false })
   holder.kill()
+  steppingHolder.kill()
   server.run.child.kill()
 })
 

@@ -1,14 +1,39 @@
 import type { Lang } from '../../shared/i18n/index.ts'
 import { shownTranslator } from './i18n.tsx'
 
-// Write actions. The X-Flightstrip header is the marker the server accepts from the local page; other sites can't send a cross-origin request carrying it
+// Write actions. The X-Flightstrip header is the marker the server accepts from the local page; other sites can't send a
+// cross-origin request carrying it. X-Flightstrip-Token is the token the page got when the CLI opened it; other programs
+// on this machine (another user, an app in a sandbox) can't get it
 export type SessionAction = 'rename' | 'retire' | 'unretire' | 'group'
 export type GroupOp = 'create' | 'rename' | 'delete' | 'move'
+
+const TOKEN_KEY = 'flightstrip-write-token'
+
+/** Pairing: the CLI opens the board with #t=<token>. Keep it, then take it out of the address bar (so it stays out of
+ *  history and screenshots) */
+export function adoptPairingToken(): void {
+  const pairing = /^#t=([0-9a-f]{64})$/.exec(window.location.hash)
+  if (pairing === null) return
+  try {
+    localStorage.setItem(TOKEN_KEY, pairing[1])
+  } catch {
+    // Storage unavailable (private browsing): the page still shows everything; writes explain how to pair
+  }
+  history.replaceState(null, '', window.location.pathname + window.location.search)
+}
+
+function token(): string {
+  try {
+    return localStorage.getItem(TOKEN_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
 
 async function post(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Flightstrip': '1' },
+    headers: { 'Content-Type': 'application/json', 'X-Flightstrip': '1', 'X-Flightstrip-Token': token() },
     body: JSON.stringify(body),
   })
   const reply = (await res.json().catch(() => ({}))) as Record<string, unknown> & { error?: string }
@@ -30,10 +55,11 @@ export async function postGroup(op: GroupOp, body: Record<string, unknown>): Pro
   else await post(`/api/groups/${op}`, body)
 }
 
-/** Act on a row of the memory ranking: end, pause or resume. force only matters for end: the row would not exit on its own */
-export async function hogAction(key: string, action: 'end' | 'pause' | 'resume', force = false): Promise<void> {
+/** Act on a row of the memory ranking: end, pause or resume. force only matters for end: the row would not exit on its own.
+ *  name is the row's name as shown, so the server can tell when the row has turned into another program since */
+export async function hogAction(key: string, name: string, action: 'end' | 'pause' | 'resume', force = false): Promise<void> {
   if (__STATIC_DEMO__) (await import('./staticDemo.ts')).applyHogAction(key, action)
-  else await post(`/api/hogs/${action}`, { key, force })
+  else await post(`/api/hogs/${action}`, { key, name, force })
 }
 
 /** Saves the language on the server; the next snapshot carries it back and the page switches then */

@@ -4,6 +4,7 @@
 // another process by itself; it only suggests and offers the buttons.
 // Tasks a session started can be paused and resumed (no progress lost); apps can only be ended.
 import { useEffect, useState } from 'react'
+import { suggested } from '../../shared/hogs.ts'
 import type { Hog, MachineReading } from '../../shared/types.ts'
 import { hogAction } from './api.ts'
 import { formatBytes } from './format.ts'
@@ -11,30 +12,31 @@ import { type I18n, useI18n } from './i18n.tsx'
 
 // This long after asking it to end, a row that is still there offers a force end instead
 const STUBBORN_MS = 8_000
+// After this long a request to end no longer counts as recent: an app of the same name started again must not open
+// straight on Force end
+const ASK_TTL_MS = 60_000
 // Rows shown before the toggle
 const SHOWN = 6
 const mem = (bytes: number) => formatBytes(bytes, 1024)
 
 function metaOf(hog: Hog, t: I18n['t']): string | null {
-  if (hog.kind === 'job') {
-    const from = hog.owner === null ? t('hogs.meta.background') : t('hogs.meta.jobOf', { owner: hog.owner })
-    return hog.paused ? t('hogs.meta.paused', { from }) : from
+  const from = hog.kind === 'job' ? (hog.owner === null ? t('hogs.meta.background') : t('hogs.meta.jobOf', { owner: hog.owner }))
+    : hog.kind === 'sessions' ? t('hogs.meta.sessions', { n: hog.hostedSessions })
+    : hog.kind === 'app' && hog.hostedSessions > 0 ? t('hogs.meta.hosts', { n: hog.hostedSessions })
+    : null
+  if (hog.stopped === 0) return from
+  // Only some processes stopped (new ones started after pausing, or some didn't stop): say so, not "paused"
+  if (hog.stopped < hog.processes) {
+    const counts = { stopped: hog.stopped, total: hog.processes }
+    return from === null ? t('hogs.meta.partlyPausedAlone', counts) : t('hogs.meta.partlyPaused', { from, ...counts })
   }
-  if (hog.kind === 'sessions') return t('hogs.meta.sessions', { n: hog.hostedSessions })
-  if (hog.kind === 'system') return null
-  return hog.hostedSessions > 0 ? t('hogs.meta.hosts', { n: hog.hostedSessions }) : null
+  return from === null ? t('hogs.meta.pausedAlone') : t('hogs.meta.paused', { from })
 }
 
 function warningOf(hog: Hog, force: boolean, t: I18n['t']): string {
   if (hog.hostedSessions > 0) return t('hogs.warn.hosted', { n: hog.hostedSessions })
   if (force) return t('hogs.warn.force')
   return hog.kind === 'job' ? t('hogs.warn.job') : t('hogs.warn.app')
-}
-
-/** What to handle first when memory is tight: the biggest task still running (it can be paused, nothing lost);
- *  failing that, the biggest app with no session inside */
-export function suggested(hogs: Hog[]): Hog | null {
-  return hogs.find((hog) => hog.pausable && !hog.paused) ?? hogs.find((hog) => hog.kind === 'app' && hog.killable && hog.hostedSessions === 0) ?? null
 }
 
 function HogRow({ hog, askedAt, now, first, onAsked, onHover }: {
@@ -44,20 +46,27 @@ function HogRow({ hog, askedAt, now, first, onAsked, onHover }: {
   now: number
   /** Memory is tight and this is the row to handle first */
   first: boolean
-  onAsked: (key: string) => void
+  /** at null: drop "recently asked to end", the button goes back to a plain End */
+  onAsked: (key: string, at: number | null) => void
   onHover: (key: string | null) => void
 }) {
   const { t } = useI18n()
   const [confirming, setConfirming] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
-  const stubborn = askedAt !== undefined && now - askedAt >= STUBBORN_MS
-  const waiting = askedAt !== undefined && !stubborn
+  const recent = askedAt !== undefined && now - askedAt < ASK_TTL_MS
+  const stubborn = recent && now - (askedAt as number) >= STUBBORN_MS
+  const waiting = recent && !stubborn
   const verb = stubborn ? t('hogs.forceEnd') : t('hogs.end')
   const act = (action: 'end' | 'pause' | 'resume') => {
     setConfirming(false)
     setFailure(null)
-    if (action === 'end') onAsked(hog.key)
-    hogAction(hog.key, action, stubborn).catch((err: Error) => setFailure(err.message))
+    if (action === 'end') onAsked(hog.key, Date.now())
+    hogAction(hog.key, hog.name, action, stubborn).catch((err: Error) => {
+      setFailure(err.message)
+      // The request didn't go through (no permission, a different program now): nothing is ending, so it must not turn
+      // into Force end 8 seconds later
+      if (action === 'end') onAsked(hog.key, null)
+    })
   }
   const meta = metaOf(hog, t)
   const hasButtons = hog.pausable || hog.killable
@@ -149,7 +158,10 @@ export function Hogs({ hogs, machine, briefsHeld, briefsEnabled, now }: {
       <ul className="hog-list">
         {shown.map((hog) => (
           <HogRow key={hog.key} hog={hog} askedAt={asked[hog.key]} now={now} first={first?.key === hog.key} onHover={setHovered}
-            onAsked={(key) => setAsked((before) => ({ ...before, [key]: Date.now() }))} />
+            onAsked={(key, at) => setAsked((before) => {
+              const { [key]: _dropped, ...rest } = before
+              return at === null ? rest : { ...rest, [key]: at }
+            })} />
         ))}
       </ul>
       {hogs.length > shown.length || showAll ? (

@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { runSetup } from '../lib/hook-setup.mjs'
-import { claudeDir, findOnPath, tildify } from '../lib/paths.mjs'
+import { claudeDir, findOnPath, stateDir, tildify } from '../lib/paths.mjs'
 import { runService } from '../lib/service.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -99,14 +99,30 @@ function describeHealth(body) {
   return health?.app === 'flightstrip' ? { kind: 'flightstrip', demo: health.demo === true } : { kind: 'other' }
 }
 
-function openBrowser(url) {
+/** The board's address with the write token (#t=…) when there is one: the page keeps it, and renaming, grouping, pausing
+ *  and ending need it. The token file is only readable by you; demo mode has none */
+function pairedUrl(url, demo) {
+  if (demo) return url
+  try {
+    const token = readFileSync(join(stateDir(), 'write-token'), 'utf8').trim()
+    return /^[0-9a-f]{64}$/.test(token) ? `${url}/#t=${token}` : url
+  } catch {
+    return url
+  }
+}
+
+function openBrowser(url, demo) {
+  const shown = url
+  url = pairedUrl(url, demo)
   const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? null : 'xdg-open'
+  // The token isn't printed: terminal output ends up in logs and screenshots. Without a browser opened for you, running
+  // flightstrip again opens one, paired
   if (command === null) {
-    console.log(`Open ${url} in your browser.`)
+    console.log(`Open ${shown} in your browser. To rename, group or end things from it, open it with \`flightstrip\` from a terminal that can launch a browser.`)
     return
   }
   const child = spawn(command, [url], { stdio: 'ignore', detached: true })
-  child.on('error', () => console.log(`Could not open a browser automatically. Open ${url} yourself.`))
+  child.on('error', () => console.log(`Could not open a browser automatically. Open ${shown} yourself; run \`flightstrip\` again from a desktop session to open it paired.`))
   child.unref()
 }
 
@@ -133,7 +149,7 @@ async function start({ demo, noOpen }) {
       fail(`A flightstrip ${running.demo ? 'demo' : 'dashboard'} is already running on port ${port}. Open ${url}, or use another port for this one, e.g.\n  PORT=${port + 1} flightstrip${demo ? ' --demo' : ''}`)
     }
     console.log(`flightstrip is already running at ${url}`)
-    if (!noOpen) openBrowser(url)
+    if (!noOpen) openBrowser(url, demo)
     return
   }
   const serverPath = join(ROOT, 'dist', 'server.js')
@@ -148,7 +164,7 @@ async function start({ demo, noOpen }) {
     const isConfigMistake = /^(PORT|FLIGHTSTRIP_\w+) must be /.test(err.message)
     fail(`flightstrip could not start: ${isConfigMistake ? err.message : err.stack}`)
   }
-  if (!noOpen) openBrowser(url)
+  if (!noOpen) openBrowser(url, demo)
 }
 
 const { values, positionals } = parseCommandLine()

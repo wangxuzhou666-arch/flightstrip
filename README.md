@@ -42,7 +42,7 @@ Each session is one tile, all the same height, so a wall of them reads at a glan
 - **Needs you.** Sessions waiting on your answer, or with a failed job nobody picked up, come first in their group. The band at the top counts them; click the number to open the first.
 - **Context.** Current context size, the same number as "tokens in context" in VS Code's session panel, against a line you choose (400K by default). Amber at 75%, red past it.
 - **Memory.** What the session and everything it started (MCP servers, shells, jobs) use.
-- **Background jobs.** Commands a session started in the background: running, failed or finished, with the last line of output. A running one shows a progress bar when its output prints steps like `[3/8]`, `45%` or `epoch 4/20`, what its processes use in CPU and memory, and a note once it has printed nothing for 5 minutes, amber when its CPU has gone quiet too.
+- **Background jobs.** Commands a session started in the background: running, failed or finished, with the last line of output. A running one shows a progress bar when its output prints steps like `[3/8]`, `45%` or `epoch 4/20`, what its processes use in CPU and memory, and a note once it has printed nothing for 5 minutes, amber when its CPU has gone quiet too. One whose processes are gone without an exit line shows as stopped.
 - **Worktrees and PRs.** Which git worktrees the session touched, and its pull request's CI status.
 
 Click a tile to open its details on the right: the full checklist, every running job, the past 3 hours and recent activity, plus rename, regroup and retire. The tiles stay in view beside it.
@@ -55,8 +55,8 @@ The band at the top counts sessions by state and shows this machine's CPU, memor
 
 Eight sessions with their MCP servers, test runs and training jobs can fill a laptop's memory before you notice. The rail on the right of the board shows where it went: one bar split by app and task, and the biggest rows below it, measured the way Activity Monitor measures (compressed and swapped-out memory included).
 
-- A big task a session started gets its own row, named after the session. **Pause** stops it without losing progress, so it stops competing for memory; **Resume** carries on. **End** asks it to exit, and offers a force end if it hasn't after 8 seconds.
-- Apps can be ended; ending one that hosts sessions (VS Code, a terminal) says how many go with it. System processes and flightstrip itself have no button.
+- A big task a session started gets its own row, named after the session. **Pause** stops it without losing progress, so it stops competing for memory; **Resume** carries on, even after the session that started it has ended. **End** asks it to exit, and offers a force end if it hasn't after 8 seconds.
+- Apps and other programs can be ended. Programs outside an app are split by process tree, so two unrelated `node` servers are two rows. Ending an app that hosts sessions (VS Code, a terminal) says how many go with it. System processes and flightstrip itself have no button.
 - flightstrip never pauses or ends anything by itself. When macOS reports memory pressure, the panel marks what to handle first, flightstrip holds its own Haiku calls until it eases, and if it lasts a minute you get a notification naming the biggest user.
 
 ## Quick start
@@ -82,7 +82,9 @@ npm i -g flightstrip && flightstrip service install
 - flightstrip reads what Claude Code already writes to `~/.claude`: running sessions, background jobs, and the tail of each transcript, parsed incrementally. It doesn't call a model to know a session's state.
 - The server listens on `127.0.0.1` only, and stops collecting when no browser tab is open. Only the memory alert keeps running: two `sysctl` reads every 30 seconds.
 - **Goal and progress lines** are written by Haiku through your own Claude Code login (`claude -p --model haiku`, no tools). Transcript text goes to the same provider the session already talks to, and nowhere else. A summary costs about $0.001, at most 90 calls an hour, and everything switches off if one call ever costs more than $0.02. Turn it off with `FLIGHTSTRIP_BRIEFS=off`; sessions that use the `setup` hook still show their own checklist.
-- **What it writes.** Its own state goes in `~/.flightstrip`. Two actions touch Claude Code: renaming a session appends a title line to its transcript, the same thing `/rename` does, and retiring a running background session runs `claude stop`. The conversation is kept either way. Pausing, resuming or ending a row of the memory ranking sends its processes a signal (`SIGSTOP`, `SIGCONT`, `SIGTERM`, and `SIGKILL` only when you click Force end).
+- **The weekly limit** comes from Claude Code itself: while the board is open, flightstrip runs `claude -p /usage` every 10 minutes, which refreshes the figures Claude Code caches without calling a model. It skips a round while memory is tight, and stops for good if that command ever costs anything.
+- **What it writes.** Its own state goes in `~/.flightstrip`, including `write-token` (below). Two actions touch Claude Code: renaming a session appends a title line to its transcript, the same thing `/rename` does, and retiring a running background session runs `claude stop`. The conversation is kept either way. Pausing, resuming or ending a row of the memory ranking sends its processes a signal (`SIGSTOP`, `SIGCONT`, `SIGTERM`, and `SIGKILL` only when you click Force end).
+- **Only your board can act.** Every change (rename, regroup, retire, pause, end) needs a token that the server keeps in `~/.flightstrip/write-token`, readable by you alone. The CLI hands it to the browser in the link it opens and never prints it, so another page or program that reaches the port can't change anything. A tab opened some other way (a bookmark, `--no-open`, the background service) says so when you click; run `flightstrip` again and it opens a paired tab. On a machine with no browser, open `http://127.0.0.1:4317/#t=` followed by the contents of that file.
 
 ## Configuration
 

@@ -7,7 +7,7 @@ import { demoMachine, demoUsage } from '../shared/demo.ts'
 import type { AgentStrip, BackgroundJob, Bay, Hog, MachineReading, Segment, Snapshot, StateKind, TimelineEvent, TodoItem, UsageReading } from '../shared/types.ts'
 import { memoryTight } from './alerts.ts'
 import { type AgentListing, type JobTimelineEntry, listAgents, readInteractiveSession, readJobState, readJobTimeline } from './agents.ts'
-import { type BriefJob, briefOf, jobNameOf, type RecentLine, requestBrief } from './brief.ts'
+import { type BriefJob, briefOf, briefsPausedReason, jobNameOf, type RecentLine, requestBrief } from './brief.ts'
 import { config } from './config.ts'
 import { groupOf, listGroups, ungroupedAt } from './groups.ts'
 import { readHogs } from './hogs.ts'
@@ -16,7 +16,7 @@ import { jobsOf, pagesOf } from './jobs.ts'
 import { cachedPr, projectOf } from './repo.ts'
 import { sampleResources } from './resources.ts'
 import { readSessionTodos, type SessionTodos } from './sessionTodos.ts'
-import { describeAction, digestTranscript, readSubagents, type TranscriptDigest } from './transcript.ts'
+import { describeAction, digestTranscript, forgetTranscripts, readSubagents, type TranscriptDigest } from './transcript.ts'
 import { readUsage } from './usage.ts'
 
 // Two agent outputs closer together than this count as one continuous stretch of work
@@ -103,12 +103,44 @@ function activityRuns(digest: TranscriptDigest, current: StateKind, currentSince
   return runs
 }
 
-/** How long the current state has held: walk back from the end over stretches with the same state */
-function stateSinceOf(runs: Segment[], current: StateKind): number | null {
+/** Since when the current state has held: walk back from the end over stretches with the same state that meet end to
+ *  end. A gap between two stretches means another state in between, so the run counts from after the gap (walking all
+ *  the way back used to measure "running for" from the earliest activity read) */
+export function stateSinceOf(runs: Segment[], current: StateKind): number | null {
   let since: number | null = null
-  for (let i = runs.length - 1; i >= 0 && runs[i].state === current; i--) since = runs[i].from
+  for (let i = runs.length - 1; i >= 0 && runs[i].state === current; i--) {
+    since = runs[i].from
+    if (i > 0 && runs[i - 1].to < runs[i].from) break
+  }
   return since
 }
+
+/** When an interactive session's current turn began. observedAt: when it was last seen */
+export interface TurnMark {
+  inTurn: boolean
+  since: number
+  observedAt: number
+}
+// Seen again after a longer gap than this (the board was closed), a new turn may have started in between and the start
+// noted before can't be used
+const TURN_OBSERVE_GAP_MS = 15_000
+
+/**
+ * The start of the current turn: the moment status went from idle to busy / waiting. statusUpdatedAt is the moment of
+ * the last change, and a permission prompt goes busy → waiting → busy, so it moves to the moment you approved (measured
+ * 2026-11-11: a turn a minute long read as 30 seconds). So the changes seen while the board is open are noted, and
+ * waiting ↔ busy is not a new turn. Not seen before, or seen with a gap: statusUpdatedAt is all there is
+ */
+export function nextTurn(prev: TurnMark | undefined, status: string | undefined, statusUpdatedAt: number | null, now: number): TurnMark | undefined {
+  if (statusUpdatedAt === null) return undefined
+  const inTurn = status === 'busy' || status === 'waiting'
+  const continuous = prev !== undefined && now - prev.observedAt <= TURN_OBSERVE_GAP_MS
+  if (inTurn && continuous && prev.inTurn) return { inTurn, since: prev.since, observedAt: now }
+  return { inTurn, since: statusUpdatedAt, observedAt: now }
+}
+
+// sessionId → the start of its current turn; updated only while collecting, dropped for sessions no longer listed
+const turns = new Map<string, TurnMark>()
 
 /** Segments drawn on the band: idle is skipped; "done" is a moment, drawn as a thin tick; clipped to the window */
 function bandSegments(runs: Segment[], start: number): Segment[] {
@@ -232,6 +264,8 @@ async function buildStrip(listing: AgentListing, now: number): Promise<Built> {
   const currentSince = kind === 'needs' && listing.status !== 'waiting'
     ? digest?.activityTimes.at(-1) ?? null
     : session?.statusUpdatedAt ?? null
+  const turn = background ? undefined : nextTurn(turns.get(listing.sessionId), listing.status, session?.statusUpdatedAt ?? null, now)
+  if (turn !== undefined) turns.set(listing.sessionId, turn)
   const runs = background
     ? jobRuns(timeline, kind, startedAt, now)
     : digest === null ? [] : activityRuns(digest, kind, currentSince, now)
@@ -256,7 +290,11 @@ async function buildStrip(listing: AgentListing, now: number): Promise<Built> {
     now: nowLine(kind, listing, job?.detail ?? null, job?.needs ?? null, digest),
     lastPrompt: oneLine(digest?.lastPrompt) || null,
     ...planOf(opening, digest, listing.sessionId, manual),
-    stateSince: stateSinceOf(runs, kind),
+    // An interactive session has official starting points, more exact than walking back over activity (a command that
+    // runs for minutes without output splits the activity): working = when this turn began; needs = when the waiting began
+    // (with a question pending, the agent's last output)
+    stateSince: background ? stateSinceOf(runs, kind)
+      : (kind === 'working' ? turn?.since : currentSince) ?? stateSinceOf(runs, kind),
     updatedAt: lastSeen || null,
     startedAt,
     segments: bandSegments(runs, start),
@@ -324,7 +362,7 @@ function assemble(allStrips: AgentStrip[], built: ReadonlyMap<string, Built>, re
     const source = built.get(strip.sessionId)
     if (source !== undefined) requestBrief(briefJobOf(strip, source.opening, source.manual?.items ?? null))
   }
-  const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: shown, retired: retiredRows, groups: listGroups(), ungroupedAt: ungroupedAt(), usage, machine, hogs, briefsHeld: memoryTight(), error: null, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
+  const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: shown, retired: retiredRows, groups: listGroups(), ungroupedAt: ungroupedAt(), usage, machine, hogs, briefsHeld: memoryTight(), briefsPaused: briefsPausedReason(), error: null, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
   return { snapshot, allStrips, revived }
 }
 
@@ -333,7 +371,7 @@ function collectDemo(retired: ReadonlyMap<string, number>): Collected {
   const now = Date.now()
   const strips = demoBoardStrips(now, serverT, groupOf)
   // Briefs are not requested: nothing is built from files, so there is nothing for Haiku to read
-  return assemble(strips, new Map(), retired, now, demoUsage(now), demoMachine(now), readHogs([], now)?.hogs ?? null)
+  return assemble(strips, new Map(), retired, now, demoUsage(now), demoMachine(now), readHogs(null, now)?.hogs ?? null)
 }
 
 export async function collectSnapshot(retired: ReadonlyMap<string, number>): Promise<Collected> {
@@ -346,10 +384,13 @@ export async function collectSnapshot(retired: ReadonlyMap<string, number>): Pro
   } catch (err) {
     // Boundary downgrade: claude not on PATH / the CLI changed its output format. The UI shows the reason; retried next round
     const error = describeCliFailure(err as Error & { stderr?: string })
-    const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: [], retired: [], groups: listGroups(), ungroupedAt: ungroupedAt(), usage, machine: (await sampleResources([])).machine, hogs: readHogs([], now)?.hogs ?? null, briefsHeld: memoryTight(), error, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
+    const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: [], retired: [], groups: listGroups(), ungroupedAt: ungroupedAt(), usage, machine: (await sampleResources([])).machine, hogs: readHogs(null, now)?.hogs ?? null, briefsHeld: memoryTight(), briefsPaused: briefsPausedReason(), error, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
     return { snapshot, allStrips: [], revived: [] }
   }
   const settled = await Promise.allSettled(listings.map((l) => buildStrip(l, now)))
+  const listed = new Set(listings.map((listing) => listing.sessionId))
+  forgetTranscripts(listed)
+  for (const sessionId of turns.keys()) if (!listed.has(sessionId)) turns.delete(sessionId)
   const built = new Map<string, Built>()
   const allStrips = settled.map((outcome, i) => {
     if (outcome.status === 'fulfilled') {
@@ -361,8 +402,7 @@ export async function collectSnapshot(retired: ReadonlyMap<string, number>): Pro
     return bareStrip(listings[i])
   })
   // The ranking also gives each session's own memory (its process and everything it started) for its card
-  const names = new Map(allStrips.map((strip) => [strip.sessionId, strip.name]))
-  const hogReading = readHogs(listings.flatMap((l) => (l.pid === undefined ? [] : [{ sessionId: l.sessionId, name: names.get(l.sessionId) ?? l.name, pid: Number(l.pid) }])), now)
+  const hogReading = readHogs(new Map(allStrips.map((strip) => [strip.sessionId, strip.name])), now)
   for (const strip of allStrips) strip.memoryBytes = hogReading?.sessionMemory.get(strip.sessionId) ?? null
   // A job's memory comes from the same top reading as its session's, so the two figures agree
   const resources = await sampleResources([...built.values()].flatMap((entry) => [...entry.outputs.values()]), Date.now(), hogReading?.memoryOf)

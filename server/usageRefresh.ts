@@ -4,18 +4,26 @@
 // The dashboard never touches credentials; it only reads the cache the client wrote (usage.ts's fallback source).
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { USAGE_REFRESH_MS } from '../shared/defaults.ts'
+import { memoryTight } from './alerts.ts'
 
 const runFile = promisify(execFile)
-const REFRESH_MS = 2 * 60_000
 
 let timer: NodeJS.Timeout | null = null
 let running = false
+// When it last really pulled: closing and reopening the board doesn't pull again at once, so a page reopened again and
+// again doesn't scan every transcript each time
+let lastRunAt = 0
 // Once /usage turns out to really call the model, stop for good: never burn tokens quietly
 let disabledReason: string | null = null
 
 async function refreshOnce(cwd: string, onDone: () => void): Promise<void> {
   if (running || disabledReason !== null) return
+  // Skipped while memory is tight: it takes hundreds of MB, exactly the kind of cost that sinks the machine; the band shows
+  // the time of the data as usual
+  if (memoryTight() || Date.now() - lastRunAt < USAGE_REFRESH_MS - 5_000) return
   running = true
+  lastRunAt = Date.now()
   try {
     const run = runFile(
       'claude',
@@ -48,7 +56,7 @@ async function refreshOnce(cwd: string, onDone: () => void): Promise<void> {
 export function startUsageRefresh(cwd: string, onDone: () => void): void {
   if (timer !== null) return
   void refreshOnce(cwd, onDone)
-  timer = setInterval(() => void refreshOnce(cwd, onDone), REFRESH_MS)
+  timer = setInterval(() => void refreshOnce(cwd, onDone), USAGE_REFRESH_MS)
 }
 
 export function stopUsageRefresh(): void {

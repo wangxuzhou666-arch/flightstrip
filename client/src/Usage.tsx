@@ -3,6 +3,7 @@
 import type { UsageReading, UsageWindow } from '../../shared/types.ts'
 import { type I18n, useI18n } from './i18n.tsx'
 import { Meter } from './SessionCard.tsx'
+import { USAGE_STALE_MS } from '../../shared/defaults.ts'
 
 /** Within a week the weekday, further out the date, then the time */
 function resetLabel(resetsAt: number | null, now: number, { t, fmt }: Pick<I18n, 't' | 'fmt'>): string | null {
@@ -37,10 +38,9 @@ export function Usage({ usage, now }: { usage: UsageReading | null; now: number 
   }
   const week = current(usage.week, now)
   const fiveHour = current(usage.fiveHour, now)
-  // The dashboard has Claude Code pull usage every 2 minutes; no update for 10 minutes means refreshing is broken,
-  // so the time of the data is shown (the cache source only updates when a session starts, so this also keeps a stale
-  // number from passing as current)
-  const stale = now - usage.at > 10 * 60_000
+  // The dashboard has Claude Code pull usage on a timer; two pulls missed means refreshing is broken (or held while
+  // memory is tight), so the time of the data is shown (this also keeps a stale number from passing as current)
+  const stale = now - usage.at > USAGE_STALE_MS
   return (
     <section className="panel week" aria-label={t('usage.label')} title={t('usage.hint')}>
       <h2 className="panel-title">{t('usage.week')}</h2>

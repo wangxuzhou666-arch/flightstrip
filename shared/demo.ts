@@ -111,7 +111,7 @@ const hogState = new Map<string, 'paused' | 'ended'>()
 
 export function demoHogs(now: number, t: Translate): Hog[] {
   const app = (key: string, name: string, memoryBytes: number, cpuPercent: number, processes: number, hostedSessions = 0): Hog => ({
-    key: `app:${key}`, name, kind: 'app', memoryBytes, cpuPercent, processes, owner: null, killable: true, pausable: false, paused: false, hostedSessions,
+    key: `app:${key}`, name, kind: 'app', memoryBytes, cpuPercent, processes, stopped: 0, owner: null, killable: true, pausable: false, paused: false, hostedSessions,
   })
   const system = (name: string, memoryBytes: number, cpuPercent: number, processes: number): Hog => ({
     ...app(name, name, memoryBytes, cpuPercent, processes), kind: 'system', killable: false,
@@ -120,13 +120,13 @@ export function demoHogs(now: number, t: Translate): Hog[] {
     app('code', 'Visual Studio Code', 3.4 * GiB, 14 + 4 * Math.sin(now / 13_000), 38, 3),
     {
       key: 'sessions', name: t('hogs.sessionsName'), kind: 'sessions', memoryBytes: 2.4 * GiB, cpuPercent: 22 + 6 * Math.sin(now / 7_000),
-      processes: 46, owner: null, killable: false, pausable: false, paused: false, hostedSessions: 7,
+      processes: 46, stopped: 0, owner: null, killable: false, pausable: false, paused: false, hostedSessions: 7,
     },
     app('chrome', 'Google Chrome', 2.1 * GiB, 9, 24),
     {
       // The same Playwright run as the job on the "Fix flaky checkout e2e test" card
       key: 'job:demo-playwright', name: 'playwright', kind: 'job', memoryBytes: 1.6 * GiB, cpuPercent: 230 + 40 * Math.sin(now / 9_000),
-      processes: 9, owner: 'Fix flaky checkout e2e test', killable: true, pausable: true, paused: false, hostedSessions: 0,
+      processes: 9, stopped: 0, owner: 'Fix flaky checkout e2e test', killable: true, pausable: true, paused: false, hostedSessions: 0,
     },
     app('docker', 'Docker Desktop', 1.3 * GiB, 6, 11),
     system('WindowServer', 520 * MB, 11, 1),
@@ -138,14 +138,14 @@ export function demoHogs(now: number, t: Translate): Hog[] {
   return ranking.flatMap((hog) => {
     const state = hogState.get(hog.key)
     if (state === 'ended') return []
-    return state === 'paused' ? [{ ...hog, paused: true, cpuPercent: 0 }] : [hog]
+    return state === 'paused' ? [{ ...hog, paused: true, stopped: hog.processes, cpuPercent: 0 }] : [hog]
   })
 }
 
 /** End, pause or resume a row of the demo ranking, refused under the same rules as the real one */
 export function actOnDemoHog(key: string, action: 'end' | 'pause' | 'resume', now: number, t: Translate): void {
   const hog = demoHogs(now, t).find((candidate) => candidate.key === key)
-  if (hog === undefined) throw new ActionError(404, t('hogs.error.gone'))
+  if (hog === undefined) throw new ActionError(409, t('hogs.error.gone'))
   if (action === 'end' && !hog.killable) throw new ActionError(403, t('hogs.error.notKillable', { name: hog.name }))
   if (action !== 'end' && !hog.pausable) throw new ActionError(403, t('hogs.error.notPausable', { name: hog.name }))
   if (action === 'end') hogState.set(key, 'ended')

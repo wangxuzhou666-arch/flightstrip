@@ -1,6 +1,6 @@
 // Subscription usage (weekly / 5-hour windows), from two sources:
 // - cachedUsageUtilization in Claude Code's global config, ~/.claude.json: usageRefresh.ts has `claude -p /usage` refresh it
-//   every 2 minutes, and fetchedAtMs is when it was really pulled. When every session runs in VS Code this is the only
+//   every 10 minutes, and fetchedAtMs is when it was really pulled. When every session runs in VS Code this is the only
 //   source that moves (VS Code doesn't run the statusline command).
 // - The per-session reports scripts/statusline.mjs writes from a terminal session's rate_limits into <state dir>/usage/:
 //   near real time, but an idle session's report stays at its old number.

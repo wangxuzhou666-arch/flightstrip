@@ -3,7 +3,8 @@
 // Refreshes are driven by file changes (session state, background jobs, transcripts and usage push
 // as soon as they hit disk); polling is only a fallback. Nothing is collected while no browser is connected,
 // except the memory alert (alerts.ts).
-import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, watch } from 'node:fs'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,6 +43,11 @@ const ACTION_ROUTE = /^\/api\/sessions\/([0-9a-f-]{36})\/(rename|retire|unretire
 const GROUP_ROUTE = /^\/api\/groups\/(create|rename|delete|move)$/
 const HOG_ROUTE = /^\/api\/hogs\/(end|pause|resume)$/
 const SETTINGS_ROUTE = '/api/settings'
+// The write token. Host, Origin and X-Flightstrip can all be forged by any program on this machine: another user, or an
+// app in a sandbox, could connect to 127.0.0.1 and end your processes. The token lives in a file only you can read
+// (0600, <state dir>/write-token); the CLI opens the board with #t=<token>, the page keeps it and sends it with every write.
+// Demo mode writes nothing and signals nothing, and saves no files, so it has no token
+const TOKEN = config.demo ? null : loadToken()
 
 const clients = new Set<ServerResponse>()
 let latestPayload: string | null = null
@@ -88,7 +94,7 @@ function requestRefresh(): void {
   const wait = Math.max(0, lastCollectAt + MIN_GAP_MS - Date.now())
   pendingTimer = setTimeout(() => {
     pendingTimer = null
-    void refresh()
+    refresh().catch((err) => console.error('[refresh]', err))
   }, wait)
 }
 
@@ -106,10 +112,11 @@ function watchFiles(): void {
       continue
     }
     // On macOS, recursive uses FSEvents, so it's cheap
+    // A watcher error (the directory deleted) must not take the server down; polling still covers it
     watch(dir, { recursive: true }, (_event, file) => {
       if (file !== null && /tool-results|file-history|\.tmp$/.test(file)) return
       requestRefresh()
-    })
+    }).on('error', (err) => console.warn(`[watch] ${dir} failed, relying on polling: ${err.message}`))
   }
 }
 
@@ -128,12 +135,20 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolveBody, reject) => {
     let text = ''
+    let tooLarge = false
     req.setEncoding('utf8')
     req.on('data', (chunk: string) => {
+      // Once over the limit nothing more is kept, however much follows: a huge request must not fill memory
+      if (tooLarge) return
       text += chunk
-      if (text.length > BODY_LIMIT) reject(new ActionError(413, serverT('error.tooLarge')))
+      if (text.length > BODY_LIMIT) {
+        tooLarge = true
+        text = ''
+        reject(new ActionError(413, serverT('error.tooLarge')))
+      }
     })
     req.on('end', () => {
+      if (tooLarge) return
       if (text === '') return resolveBody({})
       try {
         resolveBody(JSON.parse(text) as Record<string, unknown>)
@@ -145,9 +160,33 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   })
 }
 
+function loadToken(): string {
+  const file = join(config.stateDir, 'write-token')
+  mkdirSync(config.stateDir, { recursive: true })
+  try {
+    const saved = readFileSync(file, 'utf8').trim()
+    if (/^[0-9a-f]{64}$/.test(saved)) return saved
+  } catch {
+    // First start: made below
+  }
+  const token = randomBytes(32).toString('hex')
+  writeFileSync(file, token, { mode: 0o600 })
+  // mode only applies to a new file: one left over (unreadable, or another program's) keeps its own permissions
+  chmodSync(file, 0o600)
+  return token
+}
+
 /** Writes are accepted only from the local page: POST + X-Flightstrip header + matching Origin */
 function isTrustedWrite(req: IncomingMessage): boolean {
   return req.method === 'POST' && req.headers['x-flightstrip'] === '1' && ALLOWED_ORIGINS.has(req.headers.origin ?? '')
+}
+
+/** Carries the token the page got when it was opened by the CLI */
+function hasToken(req: IncomingMessage): boolean {
+  if (TOKEN === null) return true
+  const sent = Buffer.from(String(req.headers['x-flightstrip-token'] ?? ''))
+  const expected = Buffer.from(TOKEN)
+  return sent.length === expected.length && timingSafeEqual(sent, expected)
 }
 
 async function runWrite(
@@ -156,6 +195,10 @@ async function runWrite(
 ): Promise<void> {
   if (!isTrustedWrite(req)) {
     res.writeHead(403).end()
+    return
+  }
+  if (!hasToken(req)) {
+    sendJson(res, 401, { error: serverT('error.unpaired') })
     return
   }
   try {
@@ -202,18 +245,35 @@ const MIME: Record<string, string> = {
   '.json': 'application/json', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.woff': 'font/woff',
 }
 
+/** A missing file or a read error answers this one request only; it must not surface as a crash of the whole server */
 function sendFile(res: ServerResponse, path: string): void {
-  res.writeHead(200, { 'Content-Type': MIME[extname(path)] ?? 'application/octet-stream' })
-  createReadStream(path).pipe(res)
+  const stream = createReadStream(path)
+  stream.once('open', () => {
+    res.writeHead(200, { 'Content-Type': MIME[extname(path)] ?? 'application/octet-stream' })
+    stream.pipe(res)
+  })
+  stream.once('error', (err: NodeJS.ErrnoException) => {
+    if (!res.headersSent) res.writeHead(err.code === 'ENOENT' ? 404 : 500).end()
+    else res.destroy()
+  })
+}
+
+function isFile(path: string): boolean {
+  // A build empties dist and writes it again: the file can vanish between the check and the read
+  try {
+    return statSync(path).isFile()
+  } catch {
+    return false
+  }
 }
 
 function serveStatic(pathname: string, res: ServerResponse): void {
   const target = normalize(join(DIST, pathname))
   if (!target.startsWith(DIST)) {
     res.writeHead(403).end()
-  } else if (existsSync(target) && statSync(target).isFile()) {
+  } else if (isFile(target)) {
     sendFile(res, target)
-  } else if (existsSync(join(DIST, 'index.html'))) {
+  } else if (isFile(join(DIST, 'index.html'))) {
     sendFile(res, join(DIST, 'index.html'))
   } else {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('The web page is not built yet. Run npm run build, or use npm run dev while developing.')
@@ -234,7 +294,7 @@ const server = createServer((req, res) => {
   } else if (groupOp !== null) {
     void runWrite(req, res, `group ${groupOp[1]}`, (body) => groupAction(groupOp[1], body))
   } else if (hogOp !== null) {
-    void runWrite(req, res, `hog ${hogOp[1]}`, async (body) => ({ signalled: await signalHog(String(body.key ?? ''), hogOp[1] as HogAction, body.force === true) }))
+    void runWrite(req, res, `hog ${hogOp[1]}`, async (body) => ({ signalled: await signalHog(String(body.key ?? ''), typeof body.name === 'string' ? body.name : null, hogOp[1] as HogAction, body.force === true) }))
   } else if (pathname === SETTINGS_ROUTE) {
     void runWrite(req, res, 'settings', settingsAction)
   } else if (pathname === '/api/stream') {
