@@ -56,7 +56,7 @@ The band at the top counts sessions by state and shows this machine's CPU, memor
 Eight sessions with their MCP servers, test runs and training jobs can fill a laptop's memory before you notice. The rail on the right of the board shows where it went: one bar split by app and task, and the biggest rows below it, measured the way Activity Monitor measures (compressed and swapped-out memory included).
 
 - A big task a session started gets its own row, named after the session. **Pause** stops it without losing progress, so it stops competing for memory; **Resume** carries on, even after the session that started it has ended. **End** asks it to exit, and offers a force end if it hasn't after 8 seconds.
-- Apps and other programs can be ended. Programs outside an app are split by process tree, so two unrelated `node` servers are two rows. Ending an app that hosts sessions (VS Code, a terminal) says how many go with it. System processes and flightstrip itself have no button.
+- Apps and other programs can be ended. Programs outside an app are split by process tree, so two unrelated `node` servers are two rows. Ending an app that hosts sessions (VS Code, a terminal) says how many go with it. System processes, flightstrip itself and Claude Code sessions flightstrip can't find in your session list (one started with a different `CLAUDE_CONFIG_DIR`, say) have no button.
 - flightstrip never pauses or ends anything by itself. When macOS reports memory pressure, the panel marks what to handle first, flightstrip holds its own Haiku calls until it eases, and if it lasts a minute you get a notification naming the biggest user.
 
 ## Quick start

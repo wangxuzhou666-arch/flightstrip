@@ -3,7 +3,8 @@
 //     tasks split off with their owner,
 //     paused tasks kept, the dashboard's own line and the system left without an end button, the CPU leaders added;
 //     processes outside an app grouped by process tree, no buttons without a session list, the dashboard inside a task,
-//     another user's process, stranded paused processes, sessions inside sessions, Linux paths.
+//     another user's process, stranded paused processes, sessions inside sessions, Claude Code missing from the session list,
+//     Linux paths.
 //   S (signals): which processes get which signal, and what counts as refused.
 //   W (swap): the swap figure from sysctl on macOS and /proc/meminfo on Linux.
 //   D (demo): pause, resume and end change only the in-memory demo ranking, under the same rules as the real one.
@@ -13,7 +14,7 @@ import { test } from 'node:test'
 import { userInfo } from 'node:os'
 import { tsImport } from 'tsx/esm/api'
 
-const { parseTopMemory, appNameOf, displayNameOf, rank, listed, planSignal, deliver, linuxPath } = await tsImport('../server/hogs.ts', import.meta.url)
+const { parseTopMemory, appNameOf, displayNameOf, rank, listed, planSignal, deliver, linuxPath, isClaudeCode } = await tsImport('../server/hogs.ts', import.meta.url)
 const { parseSwapUsed, linuxSwapUsed } = await tsImport('../server/resources.ts', import.meta.url)
 const { demoHogs, actOnDemoHog } = await tsImport('../shared/demo.ts', import.meta.url)
 const { translator } = await tsImport('../shared/i18n/index.ts', import.meta.url)
@@ -144,7 +145,7 @@ const keyed = (groups) => Object.fromEntries(groups.map((group) => [group.key, g
 test('H6 with no session list, no app or process tree gets an end button', () => {
   const { groups } = rank(desk(), null, DASHBOARD)
   for (const group of groups) assert.equal(group.killable, false, group.name)
-  assert.equal(keyed(groups)['app:Visual Studio Code'].hostedSessions, 0)
+  assert.equal(keyed(groups)['app:Visual Studio Code'].hostedSessions, 1, 'the claude process is known by what it runs, list or no list')
 })
 
 test('H7 with the sessions known: the task is its own pausable row, and VS Code says how many sessions it holds', () => {
@@ -208,6 +209,31 @@ test('H12 a session started inside another session\'s task: the outer task leave
   assert.equal(byKey['job:200'].processes, 2)
   assert.equal(byKey['job:601'].owner, 'Inner')
   assert.equal(sessionMemory.get('s2'), 1250 * MB)
+})
+
+// A session whose file the board can't read (its CLAUDE_CONFIG_DIR isn't the board's, or a script's claude -p) used to be
+// a row named claude with an end button, and ending it closed somebody's session
+test('H14 a Claude Code process missing from the session list gets no buttons, and the app holding it counts it', () => {
+  const procs = desk()
+  procs.get(DASHBOARD).ppid = 11
+  for (const row of [
+    { pid: 700, ppid: 11, exe: CLAUDE, args: `${CLAUDE} --output-format stream-json`, memoryBytes: 400 * MB },
+    { pid: 701, ppid: 700, exe: NODE, args: `${NODE} mcp-server.js`, memoryBytes: 30 * MB, stopped: true },
+    // npm's claude, started through its link or by the script's path, and the installer's versioned binary
+    { pid: 800, ppid: 1, exe: NODE, args: `${NODE} /usr/local/bin/claude --resume`, memoryBytes: 200 * MB },
+    { pid: 810, ppid: 1, exe: NODE, args: `node --no-warnings /x/node_modules/@anthropic-ai/claude-code/cli.js`, memoryBytes: 200 * MB },
+    { pid: 820, ppid: 1, exe: '/Users/me/.local/share/claude/versions/2.1.322', args: 'claude', memoryBytes: 200 * MB },
+    { pid: 900, ppid: 1, exe: NODE, args: `${NODE} other-server.js`, memoryBytes: 200 * MB },
+    // the dashboard's own claude -p call is no session
+    { pid: 990, ppid: DASHBOARD, exe: CLAUDE, args: 'claude -p --model haiku', memoryBytes: 200 * MB },
+  ]) procs.set(row.pid, { ...procs.get(DASHBOARD), ...row })
+  const byKey = keyed(rank(procs, SESSION, DASHBOARD).groups)
+  assert.deepEqual([byKey['proc:700'].killable, byKey['proc:700'].pausable], [false, false], 'not even resume')
+  for (const key of ['proc:800', 'proc:810', 'proc:820']) assert.equal(byKey[key].killable, false, key)
+  assert.equal(byKey['proc:900'].killable, true, 'an ordinary program keeps its button')
+  assert.equal(byKey['app:Visual Studio Code'].hostedSessions, 2, 'the listed session and the unlisted one, not the dashboard\'s call')
+  assert.equal(isClaudeCode({ exe: '/Applications/Claude.app/Contents/MacOS/Claude', args: 'Claude' }), false, 'the desktop app is an app')
+  assert.equal(isClaudeCode({ exe: PY, args: `${PY} claude_helper.py` }), false)
 })
 
 // On Linux ps only gives a 15-character name, so the system rule needs the path from /proc/<pid>/exe; where that can't

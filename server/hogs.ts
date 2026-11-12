@@ -45,6 +45,9 @@ const SHELL = /^(bash|zsh|sh|dash|fish)$/
 // ps doesn't give (see processes()); gnome-shell, Xorg and the like live under /usr
 const SYSTEM_PATH = /^\/(?:System\/(?!Applications\/)|usr\/(?!local\/)|sbin\/|bin\/|lib(?:64)?\/|Library\/Apple\/)/
 const IN_APP = /\/([^/]+)\.app\//
+// Claude Code as a native binary: the VS Code extension's and npm's are named claude, the installer's is
+// ~/.local/share/claude/versions/<version>
+const CLAUDE_BINARY = /(?:^|\/)claude$|\/claude\/versions\/[^/]+$/
 const MY_UID = userInfo().uid
 const LINUX = platform() === 'linux'
 const findTool = (paths: string[], fallback: string) => paths.find((path) => existsSync(path)) ?? fallback
@@ -137,6 +140,15 @@ async function processes(): Promise<Map<number, Proc> | null> {
   }
   if (LINUX) await Promise.all([...table.values()].map(async (proc) => { proc.exe = await linuxPath(proc.pid, proc.exe, proc.args) }))
   return table
+}
+
+/** A Claude Code process: the native binary, or the npm package run by node (started through the claude link, the
+ *  script node is handed is that link, not cli.js) */
+export function isClaudeCode(proc: Pick<Proc, 'exe' | 'args'>): boolean {
+  if (CLAUDE_BINARY.test(proc.exe)) return true
+  if (!INTERPRETER.test(basename(proc.exe))) return false
+  const script = proc.args.split(/\s+/).slice(1).find((word) => !word.startsWith('-'))
+  return script !== undefined && (basename(script) === 'claude' || script.includes('@anthropic-ai/claude-code/'))
 }
 
 /** The application a process belongs to: the first .app in its path; outside an .app, the executable's name */
@@ -298,16 +310,22 @@ export function rank(table: Map<number, Proc>, sessions: SessionProc[] | null, o
     const key = IN_APP.test(proc.exe) ? `app:${appNameOf(proc.exe)}` : `proc:${rootOf(proc).pid}`
     rows.set(key, [...(rows.get(key) ?? []), proc.pid])
   }
+  // A Claude Code process missing from the session list (its CLAUDE_CONFIG_DIR isn't the board's, or a script runs
+  // claude -p) is still somebody's session: a row holding one gets no buttons, so it isn't ended as a stray program.
+  // The dashboard's own claude -p calls aren't sessions
+  const unlisted = new Set([...table.values()]
+    .filter((proc) => unclaimed(proc) && isClaudeCode(proc) && !lineage(table, proc.pid).has(ownPid))
+    .map((proc) => proc.pid))
   // The dashboard itself gets no end button; an app hosting sessions (VS Code, a terminal) says in the confirmation how
-  // many it takes along
-  const sessionLines = live.map((s) => lineage(table, s.pid))
+  // many it takes along, unlisted ones included
+  const sessionLines = [...live.map((s) => s.pid), ...unlisted].map((pid) => lineage(table, pid))
   for (const [key, pids] of rows) {
     const system = pids.some((pid) => (table.get(pid) as Proc).uid !== MY_UID || SYSTEM_PATH.test((table.get(pid) as Proc).exe))
     const sum = total(pids, table)
     const name = pids.includes(ownPid) ? serverT('hogs.selfName')
       : key.startsWith('app:') ? key.slice(4)
       : jobNameOf(heaviestOf(pids, table), table, new Set(pids))
-    const free = !system && touchable(pids)
+    const free = !system && touchable(pids) && !pids.some((pid) => unlisted.has(pid))
     groups.push({
       key, name, kind: system ? 'system' : 'app', ...sum, processes: pids.length, owner: null,
       killable: free && sessions !== null,
