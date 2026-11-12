@@ -184,7 +184,7 @@ export const zh: Dictionary = {
   'project.none': '未归属',
   'copy.done': '已复制',
   'copy.action': '复制 {command}',
-  'ctx.title': '当前 context 约 {tokens} token（最近一次回复时）。\n满格 = {line}，你定的换 session 线：过了推理质量会下降，该 /compact 了',
+  'ctx.title': '当前 context {tokens} token（最近一次回复写完时），和 VS Code 会话面板的 tokens in context 同口径。\n满格 = {line}，你定的换 session 线：过了推理质量会下降，该 /compact 了',
   'fig.todos': '待办',
   'fig.context': 'context',
   'fig.memory': '内存',

@@ -41,8 +41,9 @@ export interface TranscriptDigest {
   jobs: Record<string, RawJob>
   /** Local pages opened: url → when it was last mentioned */
   pages: Record<string, number>
-  /** Token count of the current context: input + cache_creation + cache_read of the latest main-conversation reply;
-   *  between a compaction boundary and the next reply, the boundary record's postTokens */
+  /** Token count of the current context, counted like "tokens in context" in VS Code's session panel: input +
+   *  cache_creation + cache_read + output of the latest main-conversation reply (that reply is in the context from the
+   *  next turn on); between a compaction boundary and the next reply, the boundary record's postTokens (VS Code shows 0) */
   contextTokens: number | null
 }
 
@@ -467,12 +468,15 @@ function applyLine(cursor: TranscriptCursor, line: string): void {
   }
 }
 
-/** How big the context was when this reply was sent. Synthetic messages such as errors (model <synthetic>) have all-zero usage; returns 0 and the caller skips it */
+/** How big the context is once this reply is written, the way the VS Code extension counts it (2.1.322 webview,
+ *  updateUsage): the three input figures plus this reply's own output. Counting the input alone came out a few hundred
+ *  to a few thousand below VS Code (checked on 8 sessions, 2026-11-11).
+ *  Synthetic messages such as errors (model <synthetic>) have all-zero usage; returns 0 and the caller skips it */
 function contextOf(row: Record<string, unknown>): number {
   const usage = (row.message as { usage?: Record<string, unknown> } | undefined)?.usage
   if (usage === undefined) return 0
   const count = (key: string) => (typeof usage[key] === 'number' ? (usage[key] as number) : 0)
-  return count('input_tokens') + count('cache_creation_input_tokens') + count('cache_read_input_tokens')
+  return count('input_tokens') + count('cache_creation_input_tokens') + count('cache_read_input_tokens') + count('output_tokens')
 }
 
 function applyAgentBlock(cursor: TranscriptCursor, block: ContentBlock, at: number): void {

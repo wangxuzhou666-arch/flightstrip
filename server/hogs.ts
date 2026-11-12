@@ -283,15 +283,19 @@ function refresh(): Promise<void> {
 export interface HogReading {
   hogs: Hog[]
   sessionMemory: Map<string, number>
+  /** One process's memory in that sample, counted as above; undefined for a process not running then */
+  memoryOf: (pid: number) => number | undefined
 }
 
 /** The latest ranking; when it is stale a new sample starts in the background and this call returns the old one.
  *  null before the first sample */
 export function readHogs(sessions: SessionProc[], now = Date.now()): HogReading | null {
-  if (config.demo) return { hogs: demoHogs(now, serverT), sessionMemory: new Map() }
+  if (config.demo) return { hogs: demoHogs(now, serverT), sessionMemory: new Map(), memoryOf: () => undefined }
   knownSessions = sessions
   if (latest === null || now - latest.at >= SAMPLE_MS) void refresh()
-  return latest === null ? null : { hogs: listed(latest.groups), sessionMemory: latest.sessionMemory }
+  if (latest === null) return null
+  const { table } = latest
+  return { hogs: listed(latest.groups), sessionMemory: latest.sessionMemory, memoryOf: (pid) => table.get(pid)?.memoryBytes }
 }
 
 /** A fresh sample, for the alert: the biggest row */

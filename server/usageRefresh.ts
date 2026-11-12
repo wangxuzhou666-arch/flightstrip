@@ -17,11 +17,14 @@ async function refreshOnce(cwd: string, onDone: () => void): Promise<void> {
   if (running || disabledReason !== null) return
   running = true
   try {
-    const { stdout } = await runFile(
+    const run = runFile(
       'claude',
       ['-p', '/usage', '--model', 'haiku', '--output-format', 'json', '--no-session-persistence'],
       { cwd, timeout: 60_000, maxBuffer: 1024 * 1024 },
     )
+    // With stdin left open, claude first waits 3 s for input every time
+    run.child.stdin?.end()
+    const { stdout } = await run
     const reply = JSON.parse(stdout) as { num_turns?: number; total_cost_usd?: number }
     if ((reply.num_turns ?? 0) > 0 || (reply.total_cost_usd ?? 0) > 0) {
       disabledReason = `claude -p /usage called the model (num_turns=${reply.num_turns}, cost=${reply.total_cost_usd}); the scheduled refresh is now off`
@@ -29,8 +32,13 @@ async function refreshOnce(cwd: string, onDone: () => void): Promise<void> {
     }
     onDone()
   } catch (err) {
-    // Boundary of the long-running loop: if this pull fails, wait for the next round; the board keeps using the previous cache
-    console.warn(`[usage] refresh failed: ${(err as Error).message.split('\n')[0]}`)
+    // Boundary of the long-running loop: if this pull fails, wait for the next round; the board keeps using the previous
+    // cache (and marks it once it is 10 minutes old). The first line alone ("Command failed: ...") never says why, so
+    // the time, the exit code or timeout, and stderr's last line go in too
+    const failure = err as Error & { code?: number | string; signal?: string; killed?: boolean; stderr?: string }
+    const stderr = (failure.stderr ?? '').trim().split('\n').filter((line) => !line.startsWith('Warning: no stdin')).at(-1) ?? ''
+    const how = failure.killed ? 'timed out' : `exit code ${failure.code ?? '?'}${failure.signal ? `, signal ${failure.signal}` : ''}`
+    console.warn(`[usage] ${new Date().toISOString()} refresh failed (${how}): ${stderr || failure.message.split('\n')[0]}`)
   } finally {
     running = false
   }

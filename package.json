@@ -1,6 +1,6 @@
 {
   "name": "flightstrip",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Live local dashboard for your Claude Code sessions: one strip per session with goals, progress, context usage and background jobs.",
   "keywords": [
     "claude-code",

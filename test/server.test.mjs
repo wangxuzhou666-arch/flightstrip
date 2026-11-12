@@ -381,7 +381,7 @@ test('CLAUDE_CONFIG_DIR: sessions and transcripts come from it, and the text rea
   const at = new Date().toISOString()
   writeFileSync(join(custom, 'projects', 'lane', `${sessionId}.jsonl`), [
     { type: 'user', timestamp: at, message: { content: 'Please fix the login bug' } },
-    { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'src/a.ts' } }], usage: { input_tokens: 10 } } },
+    { type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'src/a.ts' } }], usage: { input_tokens: 10, cache_creation_input_tokens: 200, cache_read_input_tokens: 3000, output_tokens: 45 } } },
   ].map((row) => JSON.stringify(row)).join('\n') + '\n')
 
   const server = await startReal({ CLAUDE_CONFIG_DIR: custom, FLIGHTSTRIP_LANG: 'zh' }, box)
@@ -392,6 +392,8 @@ test('CLAUDE_CONFIG_DIR: sessions and transcripts come from it, and the text rea
   assert.equal(strip(first).project, null, 'a session in the home directory belongs to no project')
   assert.equal(strip(first).now, '读文件：src/a.ts')
   assert.equal(strip(first).surface, '终端')
+  // Counted like VS Code's "tokens in context": the input, both cache figures and the reply's own output
+  assert.equal(strip(first).contextTokens, 10 + 200 + 3000 + 45)
 
   assert.equal((await post(server.url, '/api/settings', { lang: 'en' })).status, 200)
   const second = await snapshotWhere(server.url, (snapshot) => snapshot.lang === 'en')

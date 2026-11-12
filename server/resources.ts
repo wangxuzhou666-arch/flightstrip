@@ -217,7 +217,10 @@ function treeOf(roots: number[], table: Map<number, Proc>): number[] {
   return [...seen]
 }
 
-async function jobUsage(paths: string[], now: number): Promise<Map<string, JobUsage>> {
+/** How much memory a process uses; undefined when there is no reading for it */
+export type MemoryOf = (pid: number) => number | undefined
+
+async function jobUsage(paths: string[], now: number, memoryOf: MemoryOf | undefined): Promise<Map<string, JobUsage>> {
   const usage = new Map<string, JobUsage>()
   if (paths.length === 0) {
     holders.clear()
@@ -245,7 +248,10 @@ async function jobUsage(paths: string[], now: number): Promise<Map<string, JobUs
       // averages over the process's life on Linux and ramps up slowly on macOS
       const spent = before !== undefined ? proc.cpuSeconds - before : followed ? proc.cpuSeconds : null
       cpu += spent !== null && previous !== null ? Math.max(0, (spent * 1000) / (now - previous.at)) * 100 : proc.cpuPercent
-      memoryBytes += proc.rssBytes
+      // Counted the same way as session memory and the ranking (top's MEM, compressed and swapped pages included);
+      // under memory pressure RSS keeps only a sliver. top's reading is up to 15 s old, so a process started since
+      // then uses RSS until the next one
+      memoryBytes += memoryOf?.(pid) ?? proc.rssBytes
       sampled.set(pid, proc.cpuSeconds)
     }
     usage.set(path, { cpuPercent: cpu, memoryBytes, processes: tree.length })
@@ -266,10 +272,11 @@ export interface Resources {
 let latest: Resources | null = null
 
 /** The machine and the given running jobs' output files. Within SAMPLE_MS of the last sample the same reading comes
- *  back; a job that started in between gets its figures on the next one */
-export async function sampleResources(paths: string[], now = Date.now()): Promise<Resources> {
+ *  back; a job that started in between gets its figures on the next one. memoryOf gives each process's memory (the
+ *  ranking's top reading); without it, ps's RSS */
+export async function sampleResources(paths: string[], now = Date.now(), memoryOf?: MemoryOf): Promise<Resources> {
   if (latest !== null && now - latest.machine.at < SAMPLE_MS) return latest
-  const [machineReading, jobs] = await Promise.all([machine(now), jobUsage(paths, now)])
+  const [machineReading, jobs] = await Promise.all([machine(now), jobUsage(paths, now, memoryOf)])
   latest = { machine: machineReading, jobs }
   return latest
 }

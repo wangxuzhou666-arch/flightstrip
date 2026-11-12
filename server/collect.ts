@@ -360,16 +360,17 @@ export async function collectSnapshot(retired: ReadonlyMap<string, number>): Pro
     console.warn(`[collect] ${listings[i].name}: ${(outcome.reason as Error).message}`)
     return bareStrip(listings[i])
   })
-  const resources = await sampleResources([...built.values()].flatMap((entry) => [...entry.outputs.values()]))
+  // The ranking also gives each session's own memory (its process and everything it started) for its card
+  const names = new Map(allStrips.map((strip) => [strip.sessionId, strip.name]))
+  const hogReading = readHogs(listings.flatMap((l) => (l.pid === undefined ? [] : [{ sessionId: l.sessionId, name: names.get(l.sessionId) ?? l.name, pid: Number(l.pid) }])), now)
+  for (const strip of allStrips) strip.memoryBytes = hogReading?.sessionMemory.get(strip.sessionId) ?? null
+  // A job's memory comes from the same top reading as its session's, so the two figures agree
+  const resources = await sampleResources([...built.values()].flatMap((entry) => [...entry.outputs.values()]), Date.now(), hogReading?.memoryOf)
   for (const entry of built.values()) {
     for (const job of entry.strip.jobs) {
       const path = entry.outputs.get(job.id)
       if (path !== undefined) job.usage = resources.jobs.get(path) ?? null
     }
   }
-  // The ranking also gives each session's own memory (its process and everything it started) for its card
-  const names = new Map(allStrips.map((strip) => [strip.sessionId, strip.name]))
-  const hogReading = readHogs(listings.flatMap((l) => (l.pid === undefined ? [] : [{ sessionId: l.sessionId, name: names.get(l.sessionId) ?? l.name, pid: Number(l.pid) }])), now)
-  for (const strip of allStrips) strip.memoryBytes = hogReading?.sessionMemory.get(strip.sessionId) ?? null
   return assemble(allStrips, built, retired, now, usage, resources.machine, hogReading?.hogs ?? null)
 }

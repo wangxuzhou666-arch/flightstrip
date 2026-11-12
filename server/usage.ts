@@ -1,8 +1,11 @@
-// Subscription usage (weekly / 5-hour windows).
-// Primary source: the per-session reports scripts/statusline.mjs writes from the statusline's rate_limits field
-// into <state dir>/usage/ (official field, near real time).
-// Fallback: cachedUsageUtilization in Claude Code's global config, ~/.claude.json (undocumented; measured 2026-11-07 to refresh only when a session
-// starts, so it can be more than a day stale).
+// Subscription usage (weekly / 5-hour windows), from two sources:
+// - cachedUsageUtilization in Claude Code's global config, ~/.claude.json: usageRefresh.ts has `claude -p /usage` refresh it
+//   every 2 minutes, and fetchedAtMs is when it was really pulled. When every session runs in VS Code this is the only
+//   source that moves (VS Code doesn't run the statusline command).
+// - The per-session reports scripts/statusline.mjs writes from a terminal session's rate_limits into <state dir>/usage/:
+//   near real time, but an idle session's report stays at its old number.
+// Merging: only windows whose reset time hasn't passed count; within one window usage never goes down, so the maximum
+// wins and an old report can't hide a newer one.
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -33,11 +36,19 @@ async function readReport(path: string): Promise<UsageReading | null> {
   return { source: 'statusline', at: parsed.at, week: liveWindow(limits?.seven_day), fiveHour: liveWindow(limits?.five_hour) }
 }
 
-/** Within one window (same reset time) usage never decreases: take the latest window, then the maximum among its reports */
-function freshest(window: (r: UsageReading) => UsageWindow, reports: UsageReading[]): UsageWindow {
-  const known = reports.map(window).filter((w) => w.percent !== null)
+// Sources don't report one window's reset time identically: the statusline gives whole seconds, the /usage cache
+// milliseconds. Measured 2026-11-11, one week's two reset times were 0.23 s apart; grouping by exact equality made an
+// old 5% statusline report its own "latest week" and hid the cache's 68% from that day. Two consecutive windows reset
+// at least 5 hours apart, so reset times within an hour are the same window
+const SAME_WINDOW_MS = 60 * 60_000
+
+/** The current window's usage: a report past its reset time describes the previous window and doesn't count; of the
+ *  rest, the window that resets last, and the maximum within it. Everything past its reset time = reset, no new
+ *  report yet: empty */
+export function freshest(window: (r: UsageReading) => UsageWindow, reports: UsageReading[], now = Date.now()): UsageWindow {
+  const known = reports.map(window).filter((w) => w.percent !== null && (w.resetsAt === null || w.resetsAt > now))
   const latestReset = Math.max(...known.map((w) => w.resetsAt ?? 0))
-  const current = known.filter((w) => (w.resetsAt ?? 0) === latestReset)
+  const current = known.filter((w) => latestReset - (w.resetsAt ?? 0) < SAME_WINDOW_MS)
   if (current.length === 0) return { percent: null, resetsAt: null }
   return { percent: Math.max(...current.map((w) => w.percent as number)), resetsAt: latestReset || null }
 }
@@ -73,13 +84,14 @@ async function readCached(): Promise<UsageReading | null> {
   return reading
 }
 
-/** Both sources are merged with "same window, take the maximum": the startup cache is sometimes newer than any session's status bar */
+/** Both sources are merged with "same window, take the maximum" */
 export async function readUsage(): Promise<UsageReading | null> {
   const [live, cached] = await Promise.all([readLive(), readCached()])
   const reports = [live, cached].filter((r): r is UsageReading => r !== null)
   if (reports.length === 0) return null
   return {
-    source: live === null ? 'cache' : 'statusline',
+    // Where the latest report came from
+    source: reports.reduce((a, b) => (b.at > a.at ? b : a)).source,
     at: Math.max(...reports.map((r) => r.at)),
     week: freshest((r) => r.week, reports),
     fiveHour: freshest((r) => r.fiveHour, reports),

@@ -149,8 +149,8 @@ export interface AgentStrip {
   pr: PrRef | null
   /** The group you put it in; null = ungrouped */
   groupId: string | null
-  /** Tokens in the current context: input of the latest main-conversation reply (including cache reads and writes);
-   *  right after a compaction, the post-compaction size; null = unreadable */
+  /** Tokens in the current context: input of the latest main-conversation reply (including cache reads and writes)
+   *  plus its output, as VS Code counts it; right after a compaction, the post-compaction size; null = unreadable */
   contextTokens: number | null
   /** Memory of the session's process plus everything it started; null when the process is not running or not sampled yet */
   memoryBytes: number | null
@@ -209,8 +209,8 @@ export interface UsageWindow {
 }
 
 export interface UsageReading {
-  /** statusline: written whenever any session refreshes its status bar, near real time;
-   *  cache: cached by Claude Code at startup, may be stale */
+  /** Where the latest report came from. statusline: written when a terminal session refreshes its status bar;
+   *  cache: the cache `claude -p /usage` refreshes every 2 minutes */
   source: 'statusline' | 'cache'
   at: number
   week: UsageWindow

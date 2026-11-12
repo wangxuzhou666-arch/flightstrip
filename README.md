@@ -40,7 +40,7 @@ Each session is one tile, all the same height, so a wall of them reads at a glan
 - **Goal.** The 2–6 outcomes the session is working toward, ticked off as they land. The tile counts them and names the next one.
 - **Progress.** One plain-language line on where it is now, instead of a log to scroll.
 - **Needs you.** Sessions waiting on your answer, or with a failed job nobody picked up, come first in their group. The band at the top counts them; click the number to open the first.
-- **Context.** Current context size against a line you choose (400K by default). Amber at 75%, red past it.
+- **Context.** Current context size, the same number as "tokens in context" in VS Code's session panel, against a line you choose (400K by default). Amber at 75%, red past it.
 - **Memory.** What the session and everything it started (MCP servers, shells, jobs) use.
 - **Background jobs.** Commands a session started in the background: running, failed or finished, with the last line of output. A running one shows a progress bar when its output prints steps like `[3/8]`, `45%` or `epoch 4/20`, what its processes use in CPU and memory, and a note once it has printed nothing for 5 minutes, amber when its CPU has gone quiet too.
 - **Worktrees and PRs.** Which git worktrees the session touched, and its pull request's CI status.

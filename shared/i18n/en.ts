@@ -195,7 +195,7 @@ export const en = {
   'project.none': 'No project',
   'copy.done': 'Copied',
   'copy.action': 'Copy {command}',
-  'ctx.title': 'Current context is about {tokens} tokens (as of the latest reply).\nFull = {line}, the line you set for switching sessions: past it, reasoning quality drops and it is time to /compact',
+  'ctx.title': 'Current context is {tokens} tokens (as of the latest reply), counted like "tokens in context" in VS Code\'s session panel.\nFull = {line}, the line you set for switching sessions: past it, reasoning quality drops and it is time to /compact',
   'fig.todos': 'To-dos',
   'fig.context': 'Context',
   'fig.memory': 'Memory',

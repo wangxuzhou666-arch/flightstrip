@@ -113,8 +113,15 @@ export function Meter({ fraction, level }: { fraction: number; level?: FigLevel 
   )
 }
 
+/** One decimal, as VS Code's session panel shows it (109.4k), so the two can be compared without rounding in your head */
 function tokensLabel(tokens: number): string {
-  return tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(2)}M` : `${Math.round(tokens / 1000)}K`
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens)
+}
+
+/** The switch line is a round number you set: 400K, 1M */
+function lineLabel(tokens: number): string {
+  return tokens >= 1_000_000 ? `${tokens / 1_000_000}M` : `${Math.round(tokens / 1000)}K`
 }
 
 function todoCount(strip: AgentStrip): { done: number; total: number } | null {
@@ -141,7 +148,7 @@ function Figures({ strip, briefsEnabled, contextLine }: { strip: AgentStrip; bri
         {todos !== null && <Meter fraction={todos.total === 0 ? 0 : todos.done / todos.total} level={todos.total > 0 && todos.done === todos.total ? 'full' : undefined} />}
       </span>
       <span className="fig" data-level={ctxLevel}
-        title={tokens === null ? t('ctx.unknown') : t('ctx.title', { tokens: tokens.toLocaleString('en-US'), line: tokensLabel(contextLine) })}>
+        title={tokens === null ? t('ctx.unknown') : t('ctx.title', { tokens: tokens.toLocaleString('en-US'), line: lineLabel(contextLine) })}>
         <span className="fig-top"><i>{t('fig.context')}</i><b>{tokens === null ? '—' : tokensLabel(tokens)}</b></span>
         {tokens !== null && <Meter fraction={tokens / contextLine} level={ctxLevel} />}
       </span>
