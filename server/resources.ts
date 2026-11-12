@@ -22,7 +22,7 @@ const findTool = (paths: string[], fallback: string) => paths.find((path) => exi
 const PS = findTool(['/bin/ps', '/usr/bin/ps'], 'ps')
 const LSOF = findTool(['/usr/sbin/lsof', '/usr/bin/lsof'], 'lsof')
 // kern.memorystatus_vm_pressure_level, the level Activity Monitor's memory-pressure graph shows
-const DARWIN_PRESSURE: Record<string, MemoryPressure> = { 1: 'normal', 2: 'warn', 4: 'critical' }
+export const DARWIN_PRESSURE: Record<string, MemoryPressure> = { 1: 'normal', 2: 'warn', 4: 'critical' }
 
 /** stdout of a command, or null when it can't run, fails, or times out. lsof exits 1 when some file has no holder,
  *  and its output is still good, so the exit codes that still count as success are passed in */
@@ -72,6 +72,19 @@ export function darwinMemoryUsed(vmStat: string): number | null {
   return Number.isFinite(used) && pageSize > 0 ? used * pageSize : null
 }
 
+/** Bytes in use from the "total = 8192.00M  used = 6740.00M  free = ..." of sysctl vm.swapusage */
+export function parseSwapUsed(swapUsage: string): number | null {
+  const match = /used = ([\d.]+)([KMG])/.exec(swapUsage)
+  return match === null ? null : Number(match[1]) * 1024 ** ' KMG'.indexOf(match[2])
+}
+
+/** Swap in use from /proc/meminfo: SwapTotal minus SwapFree */
+export function linuxSwapUsed(meminfo: string): number | null {
+  const kb = (name: string) => Number(meminfo.match(new RegExp(`^${name}:\\s+(\\d+) kB`, 'm'))?.[1])
+  const used = kb('SwapTotal') - kb('SwapFree')
+  return Number.isFinite(used) ? used * 1024 : null
+}
+
 /** Memory in use from /proc/meminfo: everything but what the kernel says is available without swapping */
 export function linuxMemoryUsed(meminfo: string): number | null {
   const kb = (name: string) => Number(meminfo.match(new RegExp(`^${name}:\\s+(\\d+) kB`, 'm'))?.[1])
@@ -82,16 +95,21 @@ export function linuxMemoryUsed(meminfo: string): number | null {
 async function memory(): Promise<MachineReading['memory']> {
   const total = totalmem()
   if (platform() === 'darwin') {
-    const [stats, level] = await Promise.all([run('/usr/bin/vm_stat', []), run('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'])])
+    const [stats, sysctl] = await Promise.all([
+      run('/usr/bin/vm_stat', []),
+      run('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level', 'vm.swapusage']),
+    ])
     const used = stats === null ? null : darwinMemoryUsed(stats)
-    if (used !== null) return { usedBytes: used, totalBytes: total, pressure: DARWIN_PRESSURE[level?.trim() ?? ''] ?? null }
+    const [level = '', swap = ''] = (sysctl ?? '').split('\n')
+    if (used !== null) return { usedBytes: used, totalBytes: total, pressure: DARWIN_PRESSURE[level.trim()] ?? null, swapUsedBytes: parseSwapUsed(swap) }
   }
   if (platform() === 'linux') {
-    const used = linuxMemoryUsed(await readFile('/proc/meminfo', 'utf8').catch(() => ''))
-    if (used !== null) return { usedBytes: used, totalBytes: total, pressure: null }
+    const meminfo = await readFile('/proc/meminfo', 'utf8').catch(() => '')
+    const used = linuxMemoryUsed(meminfo)
+    if (used !== null) return { usedBytes: used, totalBytes: total, pressure: null, swapUsedBytes: linuxSwapUsed(meminfo) }
   }
   // os.freemem() on macOS leaves out the cache the system hands back on demand, so it is only the last resort
-  return { usedBytes: total - freemem(), totalBytes: total, pressure: null }
+  return { usedBytes: total - freemem(), totalBytes: total, pressure: null, swapUsedBytes: null }
 }
 
 async function disk(): Promise<MachineReading['disk']> {

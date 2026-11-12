@@ -7,7 +7,7 @@
 import { ActionError, cleanSessionName } from '../../shared/actionError.ts'
 import { arrange, demoBoardStrips, isRunning } from '../../shared/board.ts'
 import { DEFAULT_CONTEXT_LINE, WINDOW_MS } from '../../shared/defaults.ts'
-import { DEMO_GROUPS, demoMachine, demoUsage, renameDemoSession, stopDemoSession } from '../../shared/demo.ts'
+import { actOnDemoHog, DEMO_GROUPS, demoHogs, demoMachine, demoUsage, renameDemoSession, stopDemoSession } from '../../shared/demo.ts'
 import { GroupBook } from '../../shared/groupBook.ts'
 import { type Lang, langFromLocale, t, type Translate } from '../../shared/i18n/index.ts'
 import type { AgentStrip, Snapshot } from '../../shared/types.ts'
@@ -36,7 +36,8 @@ function collect(): Snapshot {
   for (const sessionId of revived) retired.delete(sessionId)
   const snapshot: Snapshot = {
     takenAt: now, lang, windowMs: WINDOW_MS, strips: shown, retired: retiredRows, groups: groups.groups, ungroupedAt: groups.ungroupedAt,
-    usage: demoUsage(now), machine: demoMachine(now), error: null, briefsEnabled: true, contextLine: DEFAULT_CONTEXT_LINE,
+    usage: demoUsage(now), machine: demoMachine(now), hogs: demoHogs(now, pageT), briefsHeld: false, error: null, briefsEnabled: true,
+    contextLine: DEFAULT_CONTEXT_LINE,
   }
   // Through JSON like the SSE stream does: the page gets copies it can keep (groups are edited in place), and fields the wire would drop are dropped here too
   return JSON.parse(JSON.stringify(snapshot)) as Snapshot
@@ -98,6 +99,12 @@ export function applyGroupOp(op: GroupOp, body: Record<string, unknown>): void {
   } else {
     groups.move(body.id, body.before ?? null)
   }
+  publish()
+}
+
+/** end / pause / resume on a row of the memory ranking; only the in-memory demo ranking changes */
+export function applyHogAction(key: string, action: 'end' | 'pause' | 'resume'): void {
+  actOnDemoHog(key, action, Date.now(), pageT)
   publish()
 }
 

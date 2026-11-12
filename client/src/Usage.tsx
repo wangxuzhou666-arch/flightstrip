@@ -1,5 +1,8 @@
+// The right block of the readings band: the subscription limit. This week's use is the big number; the 5-hour window
+// sits to its right when there is a reading, so it doesn't make the whole band taller
 import type { UsageReading, UsageWindow } from '../../shared/types.ts'
 import { type I18n, useI18n } from './i18n.tsx'
+import { Meter } from './SessionCard.tsx'
 
 /** Within a week the weekday, further out the date, then the time */
 function resetLabel(resetsAt: number | null, now: number, { t, fmt }: Pick<I18n, 't' | 'fmt'>): string | null {
@@ -9,57 +12,50 @@ function resetLabel(resetsAt: number | null, now: number, { t, fmt }: Pick<I18n,
 
 export type Level = 'ok' | 'warn' | 'high'
 
-/** Amber from 70%, red from 90%: as on the strips, color only signals that you should take a look */
+/** Amber from 70%, red from 90%: color only signals that you should take a look */
 export function level(percent: number): Level {
   if (percent >= 90) return 'high'
   if (percent >= 70) return 'warn'
   return 'ok'
 }
 
-/** One meter of the header: label, bar, percent, and a short note after it. Shared with the machine meters */
-export function MeterRow({ label, percent, tone, note, title }: {
-  label: string
-  percent: number | null
-  /** The bar's color; by default it follows the percent */
-  tone?: Level
-  note: string | null
-  title?: string
-}) {
-  return (
-    <div className="usage-row" title={title}>
-      <span className="usage-label">{label}</span>
-      <span className="usage-track" aria-hidden="true">
-        {percent !== null && <span className={`usage-fill usage-fill--${tone ?? level(percent)}`} style={{ width: `${Math.min(100, percent)}%` }} />}
-      </span>
-      <span className="usage-value">{percent === null ? '—' : `${Math.round(percent)}%`}</span>
-      <span className="usage-note">{note}</span>
-    </div>
-  )
-}
-
-function Meter({ label, window, now }: { label: string; window: UsageWindow; now: number }) {
-  const i18n = useI18n()
-  const expired = window.resetsAt !== null && window.resetsAt < now
-  return (
-    <MeterRow label={label} percent={expired ? null : window.percent}
-      note={expired ? i18n.t('usage.expired') : resetLabel(window.resetsAt, now, i18n)} />
-  )
+/** A window past its reset time with no new data yet: the old percent is not shown */
+function current(window: UsageWindow, now: number): number | null {
+  return window.resetsAt !== null && window.resetsAt < now ? null : window.percent
 }
 
 export function Usage({ usage, now }: { usage: UsageReading | null; now: number }) {
-  const { t, fmt } = useI18n()
+  const i18n = useI18n()
+  const { t, fmt } = i18n
   if (usage === null) {
-    return <p className="usage-missing">{t('usage.missing')}</p>
+    return (
+      <section className="panel week" aria-label={t('usage.label')}>
+        <h2 className="panel-title">{t('usage.week')}</h2>
+        <p className="week-note">{t('usage.missing')}</p>
+      </section>
+    )
   }
-  // The cache source only updates when a session starts, so mark when the data is from, lest a stale number pass as current.
+  const week = current(usage.week, now)
+  const fiveHour = current(usage.fiveHour, now)
   // The dashboard has Claude Code pull usage every 2 minutes; no update for 10 minutes means refreshing is broken,
-  // so the time of the data is shown
+  // so the time of the data is shown (the cache source only updates when a session starts, so this also keeps a stale
+  // number from passing as current)
   const stale = now - usage.at > 10 * 60_000
   return (
-    <div className="usage" aria-label={t('usage.label')} title={t('usage.hint')}>
-      <Meter label={t('usage.week')} window={usage.week} now={now} />
-      {usage.fiveHour.percent !== null && <Meter label={t('usage.fiveHour')} window={usage.fiveHour} now={now} />}
-      {stale && <p className="usage-stale">{t('usage.stale', { when: fmt.dateTime(usage.at) })}</p>}
-    </div>
+    <section className="panel week" aria-label={t('usage.label')} title={t('usage.hint')}>
+      <h2 className="panel-title">{t('usage.week')}</h2>
+      <div className="week-top">
+        <b className="week-value">{week === null ? '—' : <>{week}<small>%</small></>}</b>
+        {fiveHour !== null && (
+          <span className="week-five" data-level={level(fiveHour) === 'ok' ? undefined : level(fiveHour)}>
+            <i>{t('usage.fiveHour')}</i><b>{fiveHour}<small>%</small></b>
+          </span>
+        )}
+      </div>
+      {week !== null && <Meter fraction={week / 100} level={level(week)} />}
+      <p className="week-note" data-stale={stale || undefined}>
+        {stale ? t('usage.stale', { when: fmt.dateTime(usage.at) }) : week === null ? t('usage.expired') : resetLabel(usage.week.resetsAt, now, i18n)}
+      </p>
+    </section>
   )
 }

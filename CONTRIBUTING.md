@@ -18,9 +18,11 @@ Open `http://127.0.0.1:5317`. Edits to the client reload in the browser, and edi
 | To change | Edit |
 | --- | --- |
 | Colors, light and dark | `client/src/styles.css`: every color is a variable on `:root`, with dark values below it |
-| One strip: goal, progress, context meter, badges | `client/src/SessionCard.tsx` |
-| The overview: groups, dragging, the "Needs you" list | `client/src/Groups.tsx` |
-| The page, tabs and the Background jobs tab | `client/src/Board.tsx` |
+| One tile (stage, progress, to-dos, context, memory) and the details panel it opens | `client/src/SessionCard.tsx` |
+| The overview: groups, dragging, the tiles grid | `client/src/Groups.tsx` |
+| The page: top bar, the band of readings, the rail, the Background jobs tab | `client/src/Board.tsx` |
+| The machine and weekly-limit readings | `client/src/Machine.tsx`, `client/src/Usage.tsx` |
+| The memory ranking in the rail | `client/src/Hogs.tsx` (display), `server/hogs.ts` (sampling, pause and end), `server/alerts.ts` (the notification) |
 | Any text on the board | `shared/i18n/en.ts` and `shared/i18n/zh.ts` |
 | The sample sessions (`--demo` and the live demo) | `shared/demo.ts` |
 | What gets read from a transcript | `server/transcript.ts` |
@@ -30,12 +32,12 @@ Open `http://127.0.0.1:5317`. Edits to the client reload in the browser, and edi
 ## Common changes
 
 - **Restyle the board.** Change the variables at the top of `styles.css` first. Most colors only show state (blue running, orange needs you, red failed, green done), so a new palette needs four clearly different state colors.
-- **Show something new on a strip.** The data comes from `server/transcript.ts` and travels to the client in the snapshot types in `shared/types.ts`. Add the field there, then render it in `SessionCard.tsx`, and give one of the sessions in `shared/demo.ts` a value so others can see it.
+- **Show something new on a strip.** The data comes from `server/transcript.ts` and travels to the client in the snapshot types in `shared/types.ts`. Add the field there, then render it in `SessionCard.tsx` (on the tile only if it earns it, otherwise in the details), and give one of the sessions in `shared/demo.ts` a value so others can see it.
 - **Add or reword text.** Put the English string in `en.ts` and the Chinese one in `zh.ts`. `zh.ts` is typed against `en.ts`, so a missing translation fails `npm run typecheck`.
 
 ## What belongs on a strip
 
-The board exists to show less. A new field earns its place on the strip if it helps you decide which session needs you next. Everything else belongs behind **Details**, or in another tool.
+The board exists to show less. A new field earns its place on the tile if it helps you decide which session needs you next. Everything else belongs in the details panel, or in another tool.
 
 ## Before you open a pull request
 

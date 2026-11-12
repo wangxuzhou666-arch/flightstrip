@@ -10,7 +10,7 @@
 
 **[Try the live demo](https://wangxuzhou666-arch.github.io/flightstrip/)** · English · [中文](README.zh-CN.md)
 
-<img src="docs/hero.png" alt="flightstrip board: sessions grouped by project, one strip each, with the session that needs you on top" width="100%">
+<img src="docs/hero.png" alt="flightstrip board: a band of readings on top, sessions as tiles grouped by project, and the memory ranking in a rail on the right" width="100%">
 
 </div>
 
@@ -30,18 +30,31 @@ Air traffic controllers handled this decades ago: one paper strip per flight, ju
 
 ## What's on a strip
 
-<img src="docs/strip-anatomy.png" alt="One strip, annotated: goal checklist, progress line, context meter, background job, worktree" width="100%">
+<img src="docs/strip-anatomy.png" alt="One tile, annotated: status, pull request, name, progress, running job, to-dos, context and memory" width="100%">
 
-- **Goal.** The 2–6 outcomes the session is working toward, ticked off as they land.
+Each session is one tile, all the same height, so a wall of them reads at a glance:
+
+- **Goal.** The 2–6 outcomes the session is working toward, ticked off as they land. The tile counts them and names the next one.
 - **Progress.** One plain-language line on where it is now, instead of a log to scroll.
-- **Needs you.** Sessions waiting on your answer, or with a failed job nobody picked up, rise to the top.
+- **Needs you.** Sessions waiting on your answer, or with a failed job nobody picked up, come first in their group. The band at the top counts them; click the number to open the first.
 - **Context.** Current context size against a line you choose (400K by default). Amber at 75%, red past it.
+- **Memory.** What the session and everything it started (MCP servers, shells, jobs) use.
 - **Background jobs.** Commands a session started in the background: running, failed or finished, with the last line of output. A running one shows a progress bar when its output prints steps like `[3/8]`, `45%` or `epoch 4/20`, what its processes use in CPU and memory, and a note once it has printed nothing for 5 minutes, amber when its CPU has gone quiet too.
 - **Worktrees and PRs.** Which git worktrees the session touched, and its pull request's CI status.
 
-Group strips by project, name the groups yourself and drag them into the order you think in.
+Click a tile to open its details on the right: the full checklist, every running job, the past 3 hours and recent activity, plus rename, regroup and retire. The tiles stay in view beside it.
 
-The header shows this machine's CPU, memory and free disk next to your subscription usage.
+Group tiles by project, name the groups yourself and drag them into the order you think in.
+
+The band at the top counts sessions by state and shows this machine's CPU, memory, swap and free disk next to your weekly limit.
+
+## Where the memory goes
+
+Eight sessions with their MCP servers, test runs and training jobs can fill a laptop's memory before you notice. The rail on the right of the board shows where it went: one bar split by app and task, and the biggest rows below it, measured the way Activity Monitor measures (compressed and swapped-out memory included).
+
+- A big task a session started gets its own row, named after the session. **Pause** stops it without losing progress, so it stops competing for memory; **Resume** carries on. **End** asks it to exit, and offers a force end if it hasn't after 8 seconds.
+- Apps can be ended; ending one that hosts sessions (VS Code, a terminal) says how many go with it. System processes and flightstrip itself have no button.
+- flightstrip never pauses or ends anything by itself. When macOS reports memory pressure, the panel marks what to handle first, flightstrip holds its own Haiku calls until it eases, and if it lasts a minute you get a notification naming the biggest user.
 
 ## Quick start
 
@@ -64,9 +77,9 @@ npm i -g flightstrip && flightstrip service install
 <img src="docs/how-it-works.svg" alt="Claude Code writes sessions, jobs and transcripts to ~/.claude; flightstrip tails them and pushes snapshots to your browser" width="100%">
 
 - flightstrip reads what Claude Code already writes to `~/.claude`: running sessions, background jobs, and the tail of each transcript, parsed incrementally. It doesn't call a model to know a session's state.
-- The server listens on `127.0.0.1` only, and stops collecting when no browser tab is open.
+- The server listens on `127.0.0.1` only, and stops collecting when no browser tab is open. Only the memory alert keeps running: two `sysctl` reads every 30 seconds.
 - **Goal and progress lines** are written by Haiku through your own Claude Code login (`claude -p --model haiku`, no tools). Transcript text goes to the same provider the session already talks to, and nowhere else. A summary costs about $0.001, at most 90 calls an hour, and everything switches off if one call ever costs more than $0.02. Turn it off with `FLIGHTSTRIP_BRIEFS=off`; sessions that use the `setup` hook still show their own checklist.
-- **What it writes.** Its own state goes in `~/.flightstrip`. Two actions touch Claude Code: renaming a session appends a title line to its transcript, the same thing `/rename` does, and retiring a running background session runs `claude stop`. The conversation is kept either way.
+- **What it writes.** Its own state goes in `~/.flightstrip`. Two actions touch Claude Code: renaming a session appends a title line to its transcript, the same thing `/rename` does, and retiring a running background session runs `claude stop`. The conversation is kept either way. Pausing, resuming or ending a row of the memory ranking sends its processes a signal (`SIGSTOP`, `SIGCONT`, `SIGTERM`, and `SIGKILL` only when you click Force end).
 
 ## Configuration
 
@@ -75,6 +88,7 @@ npm i -g flightstrip && flightstrip service install
 | `PORT` | `4317` | Port for the board |
 | `FLIGHTSTRIP_CONTEXT_LINE` | `400000` | Where the context meter turns red |
 | `FLIGHTSTRIP_BRIEFS` | `on` | `off` stops all Haiku summaries |
+| `FLIGHTSTRIP_ALERTS` | `on` | `off` stops the memory-pressure notification |
 | `FLIGHTSTRIP_LANG` | system locale | `en` or `zh`; the toggle on the board overrides it |
 | `FLIGHTSTRIP_STATE_DIR` | `~/.flightstrip` | Groups, names, checklists and caches |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Where Claude Code keeps its files |

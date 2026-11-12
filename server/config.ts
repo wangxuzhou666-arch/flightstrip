@@ -85,6 +85,8 @@ export const config = {
   demo: switchFromEnv('FLIGHTSTRIP_DEMO', false),
   /** FLIGHTSTRIP_BRIEFS=off: no `claude -p` calls for goals, progress or job names */
   briefsEnabled: switchFromEnv('FLIGHTSTRIP_BRIEFS', true),
+  /** FLIGHTSTRIP_ALERTS=off: no macOS notification when memory stays tight (the dashboard still holds its own Haiku calls) */
+  alertsEnabled: switchFromEnv('FLIGHTSTRIP_ALERTS', true),
   /** FLIGHTSTRIP_CONTEXT_LINE: the token count the context meter treats as "full" */
   contextLine: integerFromEnv('FLIGHTSTRIP_CONTEXT_LINE', DEFAULT_CONTEXT_LINE, Number.MAX_SAFE_INTEGER),
 } as const

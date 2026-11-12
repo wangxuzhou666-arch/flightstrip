@@ -1,3 +1,4 @@
+import '@fontsource-variable/archivo/wdth.css'
 import './styles.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'

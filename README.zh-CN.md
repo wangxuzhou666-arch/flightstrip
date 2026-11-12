@@ -10,7 +10,7 @@
 
 **[在线试用演示](https://wangxuzhou666-arch.github.io/flightstrip/)** · [English](README.md) · 中文
 
-<img src="docs/hero-zh.png" alt="flightstrip 看板：session 按项目分组，一个 session 一张纸条，等你处理的排在最上面" width="100%">
+<img src="docs/hero-zh.png" alt="flightstrip 看板：顶上一排全局读数，session 按项目分组排成格子，右边常驻内存排行" width="100%">
 
 </div>
 
@@ -30,18 +30,31 @@ npx flightstrip
 
 ## 一张纸条上有什么
 
-<img src="docs/strip-anatomy-zh.png" alt="一张纸条的标注图：目标清单、进展、context 用量、后台任务、worktree" width="100%">
+<img src="docs/strip-anatomy-zh.png" alt="一张格子的标注图：状态、PR、名字、进展、在跑的实验、待办、context 和内存" width="100%">
 
-- **目标**：这个 session 要达成的 2 到 6 件事，做完一件勾一件。
+每个 session 是一个格子，格子一样高，一整面墙扫一眼就能看完：
+
+- **目标**：这个 session 要达成的 2 到 6 件事，做完一件勾一件。格子上写做了几件、下一件是什么。
 - **进展**：一句大白话说清现在做到哪了，不用去翻日志。
-- **要你处理**：在等你回答的 session，或者后台任务失败了没人管的，会排到最上面。
+- **要你处理**：在等你回答的 session，或者后台任务失败了没人管的，在组里排第一。顶上的读数带会数出有几个，点数字直接打开第一个。
 - **Context**：当前 context 有多大，对照你定的一条线（默认 400K）。到 75% 变琥珀色，过线变红。
+- **内存**：这个 session 连同它起的所有进程（MCP、shell、后台任务）占了多少内存。
 - **后台任务**：session 放到后台跑的命令，在跑、失败还是跑完，附最后一行输出。在跑的任务如果输出里有 `[3/8]`、`45%`、`epoch 4/20` 这类步骤，会显示进度条；还会显示它的进程占了多少 CPU 和内存，5 分钟没有新输出会注明，如果 CPU 也几乎不动就用琥珀色提醒。
 - **Worktree 和 PR**：这个 session 碰过哪些 git worktree，它的 PR 的 CI 状态。
 
-纸条可以按项目分组，组名自己起，拖动组头按你习惯的顺序排。
+点一个格子，详情从右边滑出来：完整的清单、所有在跑的任务、过去 3 小时和最近动态，改名、换组、退役也在这里。左边的格子一直看得见。
 
-顶栏在订阅用量旁边显示这台机器的 CPU、内存和磁盘剩余。
+格子可以按项目分组，组名自己起，拖动组头按你习惯的顺序排。
+
+顶上的读数带按状态数 session，并在本周额度旁边显示这台机器的 CPU、内存、交换区和磁盘剩余。
+
+## 内存分给了谁
+
+八个 session 加上它们的 MCP、测试和训练任务，很容易在你没注意时把笔记本的内存吃满。看板右栏显示内存去了哪：一根按应用和任务分段的条，下面是占得最多的几项，和活动监视器同口径（含被压缩和挪到交换区的部分）。
+
+- session 起的大任务单独一行，写着是哪个 session 起的。**暂停**让它先停住，进度不丢，它就不再抢内存；**继续**接着跑。**结束**让它自己退出，8 秒后还没退就给「强制结束」。
+- 应用可以结束；结束一个装着 session 的应用（VS Code、终端）时，会说清要带走几个。系统进程和 flightstrip 自己没有按钮。
+- flightstrip 不会自己去暂停或结束任何进程。macOS 报内存吃紧时，面板标出建议先处理的那一项，flightstrip 暂停自己的 Haiku 调用直到缓过来；持续一分钟还会发一条通知，写明谁占得最多。
 
 ## 快速开始
 
@@ -64,9 +77,9 @@ npm i -g flightstrip && flightstrip service install
 <img src="docs/how-it-works.svg" alt="Claude Code 把 session、后台任务和对话记录写进 ~/.claude，flightstrip 读取它们，把快照实时推给浏览器" width="100%">
 
 - flightstrip 只读 Claude Code 本来就会写进 `~/.claude` 的文件：在跑的 session、后台任务，以及每份对话记录的末尾，增量解析。判断一个 session 的状态不需要调用模型。
-- 服务只监听 `127.0.0.1`，没有浏览器标签页打开时就停止采集。
+- 服务只监听 `127.0.0.1`，没有浏览器标签页打开时就停止采集。只有内存告警一直在跑：每 30 秒读两个 `sysctl`。
 - **目标和进展**由 Haiku 写，走你自己的 Claude Code 登录（`claude -p --model haiku`，不给任何工具）。对话内容只会发给这个 session 本来就在用的同一家模型服务，不会发到别处。每条总结大约 0.001 美元，每小时最多 90 次；只要有一次调用超过 0.02 美元，就整个停掉。用 `FLIGHTSTRIP_BRIEFS=off` 可以关闭；装了 `setup` hook 的 session 仍然显示它自己写的清单。
-- **会写什么**：自己的数据放在 `~/.flightstrip`。只有两个操作会碰到 Claude Code：给 session 改名，会在它的对话记录末尾追加一行标题，和 `/rename` 做的一样；退役一个正在跑的后台 session，会执行 `claude stop`。两种情况对话都会保留。
+- **会写什么**：自己的数据放在 `~/.flightstrip`。只有两个操作会碰到 Claude Code：给 session 改名，会在它的对话记录末尾追加一行标题，和 `/rename` 做的一样；退役一个正在跑的后台 session，会执行 `claude stop`。两种情况对话都会保留。在内存排行里暂停、继续或结束一项，会给它的进程发信号（`SIGSTOP`、`SIGCONT`、`SIGTERM`，只有点「强制结束」才发 `SIGKILL`）。
 
 ## 配置
 
@@ -75,6 +88,7 @@ npm i -g flightstrip && flightstrip service install
 | `PORT` | `4317` | 看板端口 |
 | `FLIGHTSTRIP_CONTEXT_LINE` | `400000` | context 用量过这条线变红 |
 | `FLIGHTSTRIP_BRIEFS` | `on` | 设为 `off` 关闭所有 Haiku 总结 |
+| `FLIGHTSTRIP_ALERTS` | `on` | 设为 `off` 关闭内存吃紧时的系统通知 |
 | `FLIGHTSTRIP_LANG` | 跟随系统语言 | `en` 或 `zh`；看板上的切换按钮优先 |
 | `FLIGHTSTRIP_STATE_DIR` | `~/.flightstrip` | 分组、名字、清单和缓存 |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code 存文件的位置 |

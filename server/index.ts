@@ -1,7 +1,8 @@
 // Local dashboard server: listens on 127.0.0.1 only, pushes snapshots to the browser over SSE,
-// and exposes a few write actions (retire, rename, groups, language).
+// and exposes a few write actions (retire, rename, groups, language, and pausing or ending a row of the memory ranking).
 // Refreshes are driven by file changes (session state, background jobs, transcripts and usage push
-// as soon as they hit disk); polling is only a fallback. Nothing is collected while no browser is connected.
+// as soon as they hit disk); polling is only a fallback. Nothing is collected while no browser is connected,
+// except the memory alert (alerts.ts).
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, watch } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { extname, join, normalize, resolve } from 'node:path'
@@ -11,8 +12,10 @@ import { isLang } from '../shared/i18n/index.ts'
 import type { AgentStrip } from '../shared/types.ts'
 import { loadRetired, renameSession, retire, retiredSessions, unretire } from './actions.ts'
 import { startBriefs } from './brief.ts'
+import { startAlerts } from './alerts.ts'
 import { collectSnapshot } from './collect.ts'
 import { config, DEV_CLIENT_PORT } from './config.ts'
+import { type HogAction, signalHog } from './hogs.ts'
 import { assignGroup, createGroup, deleteGroup, loadGroups, moveGroup, renameGroup } from './groups.ts'
 import { loadLang, saveLang, serverT } from './lang.ts'
 import { startUsageRefresh, stopUsageRefresh } from './usageRefresh.ts'
@@ -37,6 +40,7 @@ const ALLOWED_HOSTS = new Set([
 const ALLOWED_ORIGINS = new Set([...ALLOWED_HOSTS].map((host) => `http://${host}`))
 const ACTION_ROUTE = /^\/api\/sessions\/([0-9a-f-]{36})\/(rename|retire|unretire|group)$/
 const GROUP_ROUTE = /^\/api\/groups\/(create|rename|delete|move)$/
+const HOG_ROUTE = /^\/api\/hogs\/(end|pause|resume)$/
 const SETTINGS_ROUTE = '/api/settings'
 
 const clients = new Set<ServerResponse>()
@@ -224,10 +228,13 @@ const server = createServer((req, res) => {
   const { pathname } = new URL(req.url ?? '/', `http://${req.headers.host}`)
   const action = ACTION_ROUTE.exec(pathname)
   const groupOp = GROUP_ROUTE.exec(pathname)
+  const hogOp = HOG_ROUTE.exec(pathname)
   if (action !== null) {
     void runWrite(req, res, `${action[2]} ${action[1]}`, (body) => sessionAction(action[1], action[2], body))
   } else if (groupOp !== null) {
     void runWrite(req, res, `group ${groupOp[1]}`, (body) => groupAction(groupOp[1], body))
+  } else if (hogOp !== null) {
+    void runWrite(req, res, `hog ${hogOp[1]}`, async (body) => ({ signalled: await signalHog(String(body.key ?? ''), hogOp[1] as HogAction, body.force === true) }))
   } else if (pathname === SETTINGS_ROUTE) {
     void runWrite(req, res, 'settings', settingsAction)
   } else if (pathname === '/api/stream') {
@@ -266,3 +273,4 @@ try {
 }
 console.log(`flightstrip is running at http://${config.host}:${config.port}${config.demo ? ' (demo mode: fictional sessions, nothing is read or saved)' : ''}`)
 startWatching()
+startAlerts()

@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { LANGS, type Lang } from '../shared/i18n/index.ts'
 import type { TodoItem } from '../shared/types.ts'
+import { memoryTight } from './alerts.ts'
 import { config } from './config.ts'
 import { currentLang } from './lang.ts'
 
@@ -264,6 +265,9 @@ async function drain(): Promise<void> {
       const now = Date.now()
       while (recentCalls.length > 0 && now - recentCalls[0] > 3_600_000) recentCalls.shift()
       if (recentCalls.length >= CALLS_PER_HOUR) break
+      // No new `claude` processes while memory is tight (each is about 170 MB and half a core for a few seconds).
+      // The queue stays; the next collection knocks again
+      if (memoryTight()) break
       // Naming handles a whole batch in one call, so do it first
       if (pendingNames.size > 0 && now >= namesRetryAt) {
         await runNames()

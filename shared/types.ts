@@ -152,6 +152,8 @@ export interface AgentStrip {
   /** Tokens in the current context: input of the latest main-conversation reply (including cache reads and writes);
    *  right after a compaction, the post-compaction size; null = unreadable */
   contextTokens: number | null
+  /** Memory of the session's process plus everything it started; null when the process is not running or not sampled yet */
+  memoryBytes: number | null
 }
 
 export interface RetiredRow {
@@ -170,9 +172,35 @@ export interface MachineReading {
   /** Busy share of all cores together over the last few seconds, 0–100; null before there are two samples */
   cpuPercent: number | null
   cores: number
-  memory: { usedBytes: number; totalBytes: number; pressure: MemoryPressure | null }
+  /** swapUsedBytes: the part moved out to disk (swap); null when it can't be read */
+  memory: { usedBytes: number; totalBytes: number; pressure: MemoryPressure | null; swapUsedBytes: number | null }
   /** The volume holding the home directory; null when it can't be read */
   disk: { freeBytes: number; totalBytes: number } | null
+}
+
+/** One row of the memory ranking */
+export interface Hog {
+  /** What the page sends back to act on it */
+  key: string
+  name: string
+  /** app = all processes of one application; job = a big task a session started; sessions = all Claude sessions
+   *  together; system = processes of the operating system */
+  kind: 'app' | 'job' | 'sessions' | 'system'
+  /** The same figure as Activity Monitor's Memory column, including compressed and swapped-out pages */
+  memoryBytes: number
+  /** 100 = one full core */
+  cpuPercent: number
+  processes: number
+  /** job: the name of the session that started it */
+  owner: string | null
+  /** Whether the board offers to end it */
+  killable: boolean
+  /** Whether it can be paused: only tasks a session started. A paused app would just hang with a spinner */
+  pausable: boolean
+  /** Paused (its processes are stopped), waiting for you to resume or end it */
+  paused: boolean
+  /** How many Claude sessions run inside it: ending it takes them along */
+  hostedSessions: number
 }
 
 export interface UsageWindow {
@@ -207,6 +235,10 @@ export interface Snapshot {
   ungroupedAt: number
   usage: UsageReading | null
   machine: MachineReading | null
+  /** The memory ranking, biggest first; null before the first sample */
+  hogs: Hog[] | null
+  /** Memory is tight, so the dashboard holds its own Haiku calls: todos and progress on the cards pause */
+  briefsHeld: boolean
   error: string | null
   /** False when FLIGHTSTRIP_BRIEFS=off: todos then come only from the session and progress stays empty,
    *  so the UI must not show a "still extracting" state */

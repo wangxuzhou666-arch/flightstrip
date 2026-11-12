@@ -30,6 +30,12 @@ export async function postGroup(op: GroupOp, body: Record<string, unknown>): Pro
   else await post(`/api/groups/${op}`, body)
 }
 
+/** Act on a row of the memory ranking: end, pause or resume. force only matters for end: the row would not exit on its own */
+export async function hogAction(key: string, action: 'end' | 'pause' | 'resume', force = false): Promise<void> {
+  if (__STATIC_DEMO__) (await import('./staticDemo.ts')).applyHogAction(key, action)
+  else await post(`/api/hogs/${action}`, { key, force })
+}
+
 /** Saves the language on the server; the next snapshot carries it back and the page switches then */
 export async function postLang(lang: Lang): Promise<void> {
   if (__STATIC_DEMO__) (await import('./staticDemo.ts')).applyLang(lang)

@@ -12,9 +12,10 @@
 // Time: every timestamp is "minutes before BASE", where BASE follows the clock but snaps back every LOOP_MS. So running
 // jobs and "waiting for 8 min" counters tick up while you watch, and a demo left open all day still looks fresh instead
 // of drifting out of the 3-hour window.
+import { ActionError } from './actionError.ts'
 import type { Translate } from './i18n/index.ts'
 import { progressIn } from './jobProgress.ts'
-import type { AgentStrip, MachineReading, SessionGroup, UsageReading } from './types.ts'
+import type { AgentStrip, Hog, MachineReading, SessionGroup, UsageReading } from './types.ts'
 
 const MINUTE = 60_000
 const MB = 1024 ** 2
@@ -99,9 +100,57 @@ export function demoMachine(now: number): MachineReading {
     at: now,
     cpuPercent: 34 + 6 * Math.sin(now / 11_000),
     cores: 10,
-    memory: { usedBytes: 11.4 * GiB, totalBytes: 16 * GiB, pressure: 'normal' },
+    memory: { usedBytes: 12.6 * GiB, totalBytes: 16 * GiB, pressure: 'normal', swapUsedBytes: 1.2 * GiB },
     disk: { freeBytes: 182 * GB, totalBytes: 494 * GB },
   }
+}
+
+// The memory ranking: what a busy laptop running these sessions might show. Pausing, resuming and ending change only
+// this in-memory state; the demo never signals a real process
+const hogState = new Map<string, 'paused' | 'ended'>()
+
+export function demoHogs(now: number, t: Translate): Hog[] {
+  const app = (key: string, name: string, memoryBytes: number, cpuPercent: number, processes: number, hostedSessions = 0): Hog => ({
+    key: `app:${key}`, name, kind: 'app', memoryBytes, cpuPercent, processes, owner: null, killable: true, pausable: false, paused: false, hostedSessions,
+  })
+  const system = (name: string, memoryBytes: number, cpuPercent: number, processes: number): Hog => ({
+    ...app(name, name, memoryBytes, cpuPercent, processes), kind: 'system', killable: false,
+  })
+  const ranking: Hog[] = [
+    app('code', 'Visual Studio Code', 3.4 * GiB, 14 + 4 * Math.sin(now / 13_000), 38, 3),
+    {
+      key: 'sessions', name: t('hogs.sessionsName'), kind: 'sessions', memoryBytes: 2.4 * GiB, cpuPercent: 22 + 6 * Math.sin(now / 7_000),
+      processes: 46, owner: null, killable: false, pausable: false, paused: false, hostedSessions: 7,
+    },
+    app('chrome', 'Google Chrome', 2.1 * GiB, 9, 24),
+    {
+      // The same Playwright run as the job on the "Fix flaky checkout e2e test" card
+      key: 'job:demo-playwright', name: 'playwright', kind: 'job', memoryBytes: 1.6 * GiB, cpuPercent: 230 + 40 * Math.sin(now / 9_000),
+      processes: 9, owner: 'Fix flaky checkout e2e test', killable: true, pausable: true, paused: false, hostedSessions: 0,
+    },
+    app('docker', 'Docker Desktop', 1.3 * GiB, 6, 11),
+    system('WindowServer', 520 * MB, 11, 1),
+    app('slack', 'Slack', 480 * MB, 1, 7),
+    system('kernel_task', 380 * MB, 7, 1),
+    // Small but busy: the ranking adds the CPU leaders a memory ranking would leave out
+    system('mds_stores', 64 * MB, 85, 1),
+  ]
+  return ranking.flatMap((hog) => {
+    const state = hogState.get(hog.key)
+    if (state === 'ended') return []
+    return state === 'paused' ? [{ ...hog, paused: true, cpuPercent: 0 }] : [hog]
+  })
+}
+
+/** End, pause or resume a row of the demo ranking, refused under the same rules as the real one */
+export function actOnDemoHog(key: string, action: 'end' | 'pause' | 'resume', now: number, t: Translate): void {
+  const hog = demoHogs(now, t).find((candidate) => candidate.key === key)
+  if (hog === undefined) throw new ActionError(404, t('hogs.error.gone'))
+  if (action === 'end' && !hog.killable) throw new ActionError(403, t('hogs.error.notKillable', { name: hog.name }))
+  if (action !== 'end' && !hog.pausable) throw new ActionError(403, t('hogs.error.notPausable', { name: hog.name }))
+  if (action === 'end') hogState.set(key, 'ended')
+  else if (action === 'pause') hogState.set(key, 'paused')
+  else hogState.delete(key)
 }
 
 function worktree(name: string, lastAt: number): AgentStrip['worktrees'][number] {
@@ -174,7 +223,7 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
         { at: ago(9), actor: 'agent', state: null, text: 'Account mapping is done: existing users are matched by verified email, new users get a fresh record.' },
         { at: ago(41), actor: 'you', state: null, text: 'Looks good, keep going. Use the staging provider for now.' },
       ],
-      subagents: [], jobs: [], pages: [], pr: null, contextTokens: 88_000,
+      subagents: [], jobs: [], pages: [], pr: null, contextTokens: 88_000, memoryBytes: 410 * MB,
     },
     {
       sessionId: SESSION_IDS.e2e, shortId: 'de100002', kind: 'interactive', entrypoint: 'claude-vscode',
@@ -222,7 +271,7 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
         },
       ],
       pages: [{ url: 'http://localhost:3910/checkout', label: 'localhost:3910/checkout', lastAt: ago(16), live: true }],
-      pr: pullRequest(482, 'OPEN', null, 'pending'), contextTokens: 120_000,
+      pr: pullRequest(482, 'OPEN', null, 'pending'), contextTokens: 120_000, memoryBytes: 1.9 * GiB,
     },
     {
       sessionId: SESSION_IDS.node, shortId: 'de100003', kind: 'interactive', entrypoint: 'cli',
@@ -272,7 +321,7 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
           usage: { cpuPercent: 0.3, memoryBytes: 210 * MB, processes: 3 },
         },
       ],
-      pages: [], pr: null, contextTokens: 320_000,
+      pages: [], pr: null, contextTokens: 320_000, memoryBytes: 640 * MB,
     },
     {
       sessionId: SESSION_IDS.orders, shortId: 'de100004', kind: 'interactive', entrypoint: 'cli',
@@ -309,7 +358,7 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
           command: 'k6 run load/order-create.js --vus 200 --duration 10m', status: 'failed', startedAt: ago(52), endedAt: ago(41), tail: null, progress: null, lastOutputAt: null, usage: null,
         },
       ],
-      pages: [], pr: pullRequest(473, 'OPEN', 'REVIEW_REQUIRED', 'fail'), contextTokens: 430_000,
+      pages: [], pr: pullRequest(473, 'OPEN', 'REVIEW_REQUIRED', 'fail'), contextTokens: 430_000, memoryBytes: 280 * MB,
     },
     {
       sessionId: SESSION_IDS.webhooks, shortId: 'de100005', kind: 'interactive', entrypoint: 'claude-vscode',
@@ -338,7 +387,7 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
         { at: ago(22), actor: 'agent', state: null, text: 'Webhook retries are in, with exponential backoff and a dead-letter queue. All 34 tests pass and the PR is ready for review.' },
         { at: ago(56), actor: 'you', state: null, text: 'Cap the retries at 6 hours, then park the delivery.' },
       ],
-      subagents: [], jobs: [], pages: [], pr: pullRequest(479, 'OPEN', 'APPROVED', 'pass'), contextTokens: 204_000,
+      subagents: [], jobs: [], pages: [], pr: pullRequest(479, 'OPEN', 'APPROVED', 'pass'), contextTokens: 204_000, memoryBytes: 230 * MB,
     },
     {
       sessionId: SESSION_IDS.docs, shortId: 'de100006', kind: 'interactive', entrypoint: 'claude-desktop',
@@ -363,7 +412,7 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
         { at: ago(300), actor: 'agent', state: null, text: 'Published the v2 reference for orders, customers and webhooks. Open questions are listed in docs/TODO.md.' },
         { at: ago(330), actor: 'you', state: null, text: 'Add a curl example for each endpoint.' },
       ],
-      subagents: [], jobs: [], pages: [], pr: pullRequest(461, 'MERGED', 'APPROVED', 'pass'), contextTokens: 61_000,
+      subagents: [], jobs: [], pages: [], pr: pullRequest(461, 'MERGED', 'APPROVED', 'pass'), contextTokens: 61_000, memoryBytes: 190 * MB,
     },
     {
       sessionId: SESSION_IDS.audit, shortId: 'de100007', kind: 'background', entrypoint: null,
@@ -388,7 +437,7 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
         { at: ago(4), actor: 'agent', state: 'working', text: 'Scanning dependencies' },
         { at: ago(35), actor: 'agent', state: 'working', text: 'Started the audit' },
       ],
-      subagents: [], jobs: [], pages: [], pr: null, contextTokens: 146_000,
+      subagents: [], jobs: [], pages: [], pr: null, contextTokens: 146_000, memoryBytes: 350 * MB,
     },
     {
       sessionId: SESSION_IDS.backfill, shortId: 'de100008', kind: 'background', entrypoint: null,
@@ -416,7 +465,7 @@ function buildStrips(now: number, ago: (minutes: number) => number): DemoStrip[]
         { at: ago(26), actor: 'agent', state: 'failed', text: 'Stopped at row 48,213: NULL currency' },
         { at: ago(64), actor: 'agent', state: 'working', text: 'Started the backfill' },
       ],
-      subagents: [], jobs: [], pages: [], pr: null, contextTokens: null,
+      subagents: [], jobs: [], pages: [], pr: null, contextTokens: null, memoryBytes: null,
     },
   ]
 }

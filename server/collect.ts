@@ -4,11 +4,13 @@ import { basename } from 'node:path'
 import { arrange, BAY_ORDER, demoBoardStrips, needsLine, surfaceOf } from '../shared/board.ts'
 import { WINDOW_MS } from '../shared/defaults.ts'
 import { demoMachine, demoUsage } from '../shared/demo.ts'
-import type { AgentStrip, BackgroundJob, Bay, MachineReading, Segment, Snapshot, StateKind, TimelineEvent, TodoItem, UsageReading } from '../shared/types.ts'
+import type { AgentStrip, BackgroundJob, Bay, Hog, MachineReading, Segment, Snapshot, StateKind, TimelineEvent, TodoItem, UsageReading } from '../shared/types.ts'
+import { memoryTight } from './alerts.ts'
 import { type AgentListing, type JobTimelineEntry, listAgents, readInteractiveSession, readJobState, readJobTimeline } from './agents.ts'
 import { type BriefJob, briefOf, jobNameOf, type RecentLine, requestBrief } from './brief.ts'
 import { config } from './config.ts'
 import { groupOf, listGroups, ungroupedAt } from './groups.ts'
+import { readHogs } from './hogs.ts'
 import { currentLang, serverT } from './lang.ts'
 import { jobsOf, pagesOf } from './jobs.ts'
 import { cachedPr, projectOf } from './repo.ts'
@@ -265,6 +267,7 @@ async function buildStrip(listing: AgentListing, now: number): Promise<Built> {
     pr: cachedPr(listing.cwd, branch),
     groupId: groupOf(listing.sessionId),
     contextTokens: digest?.contextTokens ?? null,
+    memoryBytes: null,
   }
   const outputs = new Map(jobs.flatMap((shown) => {
     const path = shown.status === 'running' ? digest?.jobs[shown.id]?.outputPath : null
@@ -281,7 +284,7 @@ function bareStrip(listing: AgentListing): AgentStrip {
     project: listing.cwd, cwd: listing.cwd, branch: null, bay: bayOf(kind, null, 0, []), stateKind: kind,
     now: serverT('now.unreadable'), lastPrompt: null, goal: null, todos: null, todoSource: null, todosDoneEarlier: 0, progress: null, progressAt: null, worktrees: [], stateSince: null, updatedAt: null,
     startedAt: listing.startedAt === undefined ? null : Number(listing.startedAt),
-    segments: [], events: [], subagents: [], jobs: [], pages: [], pr: null, groupId: groupOf(listing.sessionId), contextTokens: null,
+    segments: [], events: [], subagents: [], jobs: [], pages: [], pr: null, groupId: groupOf(listing.sessionId), contextTokens: null, memoryBytes: null,
   }
 }
 
@@ -314,14 +317,14 @@ const OWN_CWD = config.stateDir
 
 /** Hides retired strips, requests briefs for the ones on display and wraps everything into a Snapshot */
 function assemble(allStrips: AgentStrip[], built: ReadonlyMap<string, Built>, retired: ReadonlyMap<string, number>, now: number,
-  usage: UsageReading | null, machine: MachineReading | null): Collected {
+  usage: UsageReading | null, machine: MachineReading | null, hogs: Hog[] | null): Collected {
   const { shown, retiredRows, revived } = arrange(allStrips, retired)
   // Only strips on display get todos and progress written; retired ones cost nothing
   for (const strip of shown) {
     const source = built.get(strip.sessionId)
     if (source !== undefined) requestBrief(briefJobOf(strip, source.opening, source.manual?.items ?? null))
   }
-  const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: shown, retired: retiredRows, groups: listGroups(), ungroupedAt: ungroupedAt(), usage, machine, error: null, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
+  const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: shown, retired: retiredRows, groups: listGroups(), ungroupedAt: ungroupedAt(), usage, machine, hogs, briefsHeld: memoryTight(), error: null, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
   return { snapshot, allStrips, revived }
 }
 
@@ -330,7 +333,7 @@ function collectDemo(retired: ReadonlyMap<string, number>): Collected {
   const now = Date.now()
   const strips = demoBoardStrips(now, serverT, groupOf)
   // Briefs are not requested: nothing is built from files, so there is nothing for Haiku to read
-  return assemble(strips, new Map(), retired, now, demoUsage(now), demoMachine(now))
+  return assemble(strips, new Map(), retired, now, demoUsage(now), demoMachine(now), readHogs([], now)?.hogs ?? null)
 }
 
 export async function collectSnapshot(retired: ReadonlyMap<string, number>): Promise<Collected> {
@@ -343,7 +346,7 @@ export async function collectSnapshot(retired: ReadonlyMap<string, number>): Pro
   } catch (err) {
     // Boundary downgrade: claude not on PATH / the CLI changed its output format. The UI shows the reason; retried next round
     const error = describeCliFailure(err as Error & { stderr?: string })
-    const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: [], retired: [], groups: listGroups(), ungroupedAt: ungroupedAt(), usage, machine: (await sampleResources([])).machine, error, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
+    const snapshot: Snapshot = { takenAt: now, lang: currentLang(), windowMs: WINDOW_MS, strips: [], retired: [], groups: listGroups(), ungroupedAt: ungroupedAt(), usage, machine: (await sampleResources([])).machine, hogs: readHogs([], now)?.hogs ?? null, briefsHeld: memoryTight(), error, briefsEnabled: config.briefsEnabled, contextLine: config.contextLine }
     return { snapshot, allStrips: [], revived: [] }
   }
   const settled = await Promise.allSettled(listings.map((l) => buildStrip(l, now)))
@@ -364,5 +367,9 @@ export async function collectSnapshot(retired: ReadonlyMap<string, number>): Pro
       if (path !== undefined) job.usage = resources.jobs.get(path) ?? null
     }
   }
-  return assemble(allStrips, built, retired, now, usage, resources.machine)
+  // The ranking also gives each session's own memory (its process and everything it started) for its card
+  const names = new Map(allStrips.map((strip) => [strip.sessionId, strip.name]))
+  const hogReading = readHogs(listings.flatMap((l) => (l.pid === undefined ? [] : [{ sessionId: l.sessionId, name: names.get(l.sessionId) ?? l.name, pid: Number(l.pid) }])), now)
+  for (const strip of allStrips) strip.memoryBytes = hogReading?.sessionMemory.get(strip.sessionId) ?? null
+  return assemble(allStrips, built, retired, now, usage, resources.machine, hogReading?.hogs ?? null)
 }

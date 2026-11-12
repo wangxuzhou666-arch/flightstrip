@@ -1,7 +1,8 @@
-// The overview is laid out by the groups you created: groups run top to bottom, are collapsible, and the whole page
-// scrolls; press and hold the handle left of a group header and drag up or down to reorder groups.
-// Strips that need you are listed in a row at the very top, click the name to jump to its card; the order inside a
-// group is already set by the server (waiting → running → just finished → idle). Retired strips fold at the very bottom
+// The overview is laid out by the groups you created: groups run top to bottom and are collapsible; press and hold the
+// handle left of a group header and drag up or down to reorder groups.
+// A group holds equal-height tiles, in the order the server set (waiting → running → just finished → idle). How many
+// sessions need you is in the readings band at the top of the page, which opens the first one. Retired strips fold at
+// the very bottom
 import { type FormEvent, useEffect, useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/index.ts'
 import type { AgentStrip, Bay, SessionGroup, Snapshot } from '../../shared/types.ts'
@@ -9,7 +10,7 @@ import { postGroup } from './api.ts'
 import { useI18n } from './i18n.tsx'
 import { CaretIcon, GripIcon, PencilIcon, TrashIcon } from './icons.tsx'
 import { RetiredFold } from './Retired.tsx'
-import { SessionCard, StageMark, stageOf } from './SessionCard.tsx'
+import { SessionTile } from './SessionCard.tsx'
 import { type GripHandlers, useGroupDrag } from './useGroupDrag.ts'
 
 /** The code for "ungrouped" in the ordering; same as UNGROUPED in the server's groups.ts */
@@ -92,23 +93,16 @@ function NameForm({ initial, label, submitLabel, onSubmit, onCancel, busy }: {
   )
 }
 
-function GroupSection({ group, strips, snapshot, collapsed, onToggle, grip, offset = 0, lifted = false, hint }: {
+function GroupSection({ group, strips, snapshot, collapsed, onToggle, grip, offset = 0, lifted = false, hint, openId, onOpen }: {
   group: SessionGroup | null; strips: AgentStrip[]; snapshot: Snapshot; collapsed: boolean; onToggle: () => void
-  grip?: GripHandlers; offset?: number; lifted?: boolean; hint?: string
+  grip?: GripHandlers; offset?: number; lifted?: boolean; hint?: string; openId: string | null; onOpen: (strip: AgentStrip) => void
 }) {
   const { t } = useI18n()
   const [mode, setMode] = useState<'view' | 'renaming' | 'confirmDelete'>('view')
-  const [showIdle, setShowIdle] = useState(false)
   const { busy, failure, run } = useBusy()
   const key = group?.id ?? UNGROUPED
   const name = group?.name ?? t('group.ungrouped')
-  const active = strips.filter((s) => s.bay !== 'idle')
-  const idle = strips.filter((s) => s.bay === 'idle')
   const summary = SUMMARY.map((item) => ({ ...item, n: strips.filter((s) => s.bay === item.bay).length })).filter((item) => item.n > 0)
-  const card = (strip: AgentStrip) => (
-    <SessionCard key={strip.sessionId} strip={strip} groups={snapshot.groups} now={snapshot.takenAt} windowMs={snapshot.windowMs}
-      briefsEnabled={snapshot.briefsEnabled} contextLine={snapshot.contextLine} />
-  )
 
   return (
     <section className="group" aria-label={name} data-group={key} data-lifted={lifted || undefined}
@@ -154,48 +148,19 @@ function GroupSection({ group, strips, snapshot, collapsed, onToggle, grip, offs
         {!collapsed && (
           <>
             {hint !== undefined && <p className="hint group-hint">{hint}</p>}
-            {active.length > 0 && <ol className="cards">{active.map(card)}</ol>}
-            {idle.length > 0 && (
-              <>
-                <button type="button" className="text-btn group-idle" aria-expanded={showIdle} onClick={() => setShowIdle(!showIdle)}>
-                  {showIdle ? t('group.idleHide', { n: idle.length }) : t('group.idleShow', { n: idle.length })}
-                </button>
-                {showIdle && <ol className="cards">{idle.map(card)}</ol>}
-              </>
+            {strips.length > 0 && (
+              <ol className="tiles">
+                {strips.map((strip) => (
+                  <SessionTile key={strip.sessionId} strip={strip} now={snapshot.takenAt} windowMs={snapshot.windowMs}
+                    briefsEnabled={snapshot.briefsEnabled} contextLine={snapshot.contextLine}
+                    open={openId === strip.sessionId} onOpen={() => onOpen(strip)} />
+                ))}
+              </ol>
             )}
             {strips.length === 0 && group !== null && <p className="hint group-hint">{t('group.empty', { name: group.name })}</p>}
           </>
         )}
       </div>
-    </section>
-  )
-}
-
-function NeedsCallout({ strips, groups, now, onJump }: { strips: AgentStrip[]; groups: SessionGroup[]; now: number; onJump: (strip: AgentStrip) => void }) {
-  const i18n = useI18n()
-  const { t } = i18n
-  return (
-    <section className="section">
-      <h2 className="section-title">{t('overview.needsTitle')}<span className="count">{strips.length}</span></h2>
-      {strips.length === 0 ? (
-        <p className="hint">{t('overview.needsEmpty')}</p>
-      ) : (
-        <ul className="rows">
-          {strips.map((strip) => {
-            const stage = stageOf(strip, now, i18n)
-            const group = groups.find((g) => g.id === strip.groupId)
-            return (
-              <li key={strip.sessionId} className="row" data-attn={stage.tone}>
-                <span className="row-stage"><StageMark stage={stage} /></span>
-                <span className="row-body">
-                  <button type="button" className="row-title link-btn" title={t('overview.jump')} onClick={() => onJump(strip)}>{strip.name}</button>
-                  <span className="row-meta row-meta--clip" title={strip.now}>{t('overview.needsMeta', { group: group?.name ?? t('group.ungrouped'), now: strip.now })}</span>
-                </span>
-              </li>
-            )
-          })}
-        </ul>
-      )}
     </section>
   )
 }
@@ -245,34 +210,37 @@ function useGroupOrder(groups: SessionGroup[], ungroupedAt: number, showUngroupe
   return { order, move, failure }
 }
 
-export function GroupedOverview({ snapshot }: { snapshot: Snapshot }) {
-  const { t } = useI18n()
+/** Opening a session: expand its group if it is collapsed, then scroll its tile into view */
+export function useReveal() {
   const { collapsed, toggle, expand } = useCollapsed()
-  const [jumpTo, setJumpTo] = useState<string | null>(null)
+  const [revealing, setRevealing] = useState<string | null>(null)
+  useEffect(() => {
+    // Wait for the group to expand and the tile to render before scrolling
+    if (revealing === null) return
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    document.getElementById(`card-${revealing}`)?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' })
+    setRevealing(null)
+  }, [revealing])
+  const reveal = (strip: AgentStrip) => {
+    expand(strip.groupId ?? UNGROUPED)
+    setRevealing(strip.sessionId)
+  }
+  return { collapsed, toggle, reveal }
+}
+
+export function GroupedOverview({ snapshot, collapsed, toggle, openId, onOpen }: {
+  snapshot: Snapshot; collapsed: Set<string>; toggle: (key: string) => void; openId: string | null; onOpen: (strip: AgentStrip) => void
+}) {
+  const { t } = useI18n()
   const { groups, strips } = snapshot
   const ungrouped = strips.filter((s) => s.groupId === null)
-  const needs = strips.filter((s) => s.bay === 'needs')
   const { order, move, failure } = useGroupOrder(groups, snapshot.ungroupedAt, ungrouped.length > 0 || groups.length === 0)
   const { containerRef, dragging, grip, offsetOf } = useGroupDrag(order, move)
   // While dragging everything collapses to group headers; on release each group returns to its previous collapsed state
   const isCollapsed = (key: string) => dragging !== null || collapsed.has(key)
 
-  useEffect(() => {
-    // Wait for the group to expand and the card to render before scrolling
-    if (jumpTo === null) return
-    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    document.getElementById(`card-${jumpTo}`)?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' })
-    setJumpTo(null)
-  }, [jumpTo])
-
-  const jump = (strip: AgentStrip) => {
-    expand(strip.groupId ?? UNGROUPED)
-    setJumpTo(strip.sessionId)
-  }
-
   return (
     <>
-      <NeedsCallout strips={needs} groups={groups} now={snapshot.takenAt} onJump={jump} />
       <div className="groups" ref={containerRef} data-dragging={dragging !== null || undefined}>
         {order.map((key) => {
           const group = groups.find((g) => g.id === key) ?? null
@@ -280,7 +248,8 @@ export function GroupedOverview({ snapshot }: { snapshot: Snapshot }) {
             <GroupSection key={key} group={group} strips={strips.filter((s) => s.groupId === (group?.id ?? null))} snapshot={snapshot}
               collapsed={isCollapsed(key)} onToggle={() => toggle(key)}
               grip={order.length > 1 ? grip(key) : undefined} offset={offsetOf(key)} lifted={dragging === key}
-              hint={group === null && groups.length === 0 ? t('overview.noGroupsHint') : undefined} />
+              hint={group === null && groups.length === 0 ? t('overview.noGroupsHint') : undefined}
+              openId={openId} onOpen={onOpen} />
           )
         })}
         {failure !== null && <p className="error" role="alert">{failure}</p>}
