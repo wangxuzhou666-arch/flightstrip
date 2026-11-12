@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- The mark on a black tile, so it shows on light and dark tab bars alike -->
+  <rect width="32" height="32" rx="7" fill="#000"/>
+  <g transform="translate(3.2 3.2) scale(0.8)">
+    <g fill="#f2f3f5">
+      <rect x="15.1" y="3.2" width="1.8" height="4"/>
+      <path d="M8.6 7h14.8l1.3 2.3H7.3z"/>
+      <path d="M5.4 10.3h21.2l-3.3 8.4H8.7z"/>
+      <path d="M12.2 19.8h7.6l1.7 9.4h-11z"/>
+      <rect x="6.5" y="29" width="19" height="2.2" rx="1.1"/>
+    </g>
+    <g fill="#6c9bf5">
+      <path d="M7.75 12.3h16.5l-1.15 3.1H8.9z"/>
+      <circle cx="16" cy="2.4" r="1.9"/>
+    </g>
+  </g>
+</svg>

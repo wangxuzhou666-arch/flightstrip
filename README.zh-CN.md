@@ -10,7 +10,10 @@
 
 **[在线试用演示](https://wangxuzhou666-arch.github.io/flightstrip/)** · [English](README.md) · 中文
 
-<img src="docs/hero-zh.png" alt="flightstrip 看板：顶上一排全局读数，session 按项目分组排成格子，右边常驻内存排行" width="100%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/hero-zh-dark.png">
+  <img src="docs/hero-zh.png" alt="flightstrip 看板：顶上一排全局读数，session 按项目分组排成格子，右边常驻内存排行" width="100%">
+</picture>
 
 </div>
 

@@ -27,27 +27,28 @@
   --mono: ui-monospace, 'SF Mono', Menlo, monospace;
 }
 
+/* Dark is black: a pure black page with panels one neutral step up (no blue cast); the status colors mean the same as in light */
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
-    --bg: #141a24;
-    --panel: #1b2331;
-    --module: #232d3f;
-    --line: #2d384c;
-    --line-strong: #3a475e;
-    --soft: #263042;
-    --label: #e7ecf4;
-    --label-2: #b0bacb;
-    --label-3: #8693a9;
-    --caption: #8693a9;
+    --bg: #000000;
+    --panel: #0f1012;
+    --module: #18191c;
+    --line: #25272b;
+    --line-strong: #34373c;
+    --soft: #1e2023;
+    --label: #f2f3f5;
+    --label-2: #b5b8bf;
+    --label-3: #858991;
+    --caption: #858991;
     --brand: #6c9bf5;
     --ok: #4cc38a;
     --warn: #f0a63a;
     --warn-fill: #f0a63a;
     --err: #f0706b;
-    --quiet: #6f7c93;
-    --hover: rgba(255, 255, 255, 0.05);
-    --shadow: rgba(0, 0, 0, 0.4);
+    --quiet: #6b6f77;
+    --hover: rgba(255, 255, 255, 0.06);
+    --shadow: rgba(0, 0, 0, 0.7);
   }
 }
 
@@ -79,7 +80,8 @@ button, input, select { font-stretch: inherit; }
 .page { padding: 0 24px 48px; }
 .top { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 24px; min-height: 54px; }
 .brand { display: flex; align-items: center; gap: 8px; font-size: 16px; line-height: 24px; font-weight: 600; }
-.brand svg { color: var(--brand); }
+.brand svg { color: var(--label); flex: none; }
+.brand-accent { fill: var(--brand); }
 .tabs { display: flex; gap: 4px; }
 .tab { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 6px; color: var(--label-3); white-space: nowrap; }
 .tab:hover { color: var(--label); }

@@ -220,8 +220,19 @@ function Page({ snapshot, connection }: { snapshot: Snapshot | null; connection:
       {__STATIC_DEMO__ && <div className="banner banner--plain banner--demo"><p><WithCode text={t('banner.sample')} /></p></div>}
       <header className="top">
         <h1 className="brand">
-          <svg width="18" height="18" viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M5.5 15l1-7h3l1 7 M4 8h8l-1-3H5z M8 5V2.5 M6 2.5h4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+          {/* The mark: a solid control tower whose beacon and cab windows are lit in the brand blue; client/public/favicon.svg is the same shape */}
+          <svg width="22" height="22" viewBox="0 0 32 32" aria-hidden="true">
+            <g fill="currentColor">
+              <rect x="15.1" y="3.2" width="1.8" height="4" />
+              <path d="M8.6 7h14.8l1.3 2.3H7.3z" />
+              <path d="M5.4 10.3h21.2l-3.3 8.4H8.7z" />
+              <path d="M12.2 19.8h7.6l1.7 9.4h-11z" />
+              <rect x="6.5" y="29" width="19" height="2.2" rx="1.1" />
+            </g>
+            <g className="brand-accent">
+              <path d="M7.75 12.3h16.5l-1.15 3.1H8.9z" />
+              <circle cx="16" cy="2.4" r="1.9" />
+            </g>
           </svg>
           {APP_NAME}
         </h1>

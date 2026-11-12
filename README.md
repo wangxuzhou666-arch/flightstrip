@@ -10,7 +10,10 @@
 
 **[Try the live demo](https://wangxuzhou666-arch.github.io/flightstrip/)** · English · [中文](README.zh-CN.md)
 
-<img src="docs/hero.png" alt="flightstrip board: a band of readings on top, sessions as tiles grouped by project, and the memory ranking in a rail on the right" width="100%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/hero-dark.png">
+  <img src="docs/hero.png" alt="flightstrip board: a band of readings on top, sessions as tiles grouped by project, and the memory ranking in a rail on the right" width="100%">
+</picture>
 
 </div>
 
